@@ -12,23 +12,39 @@ class GomokuEnv:
             num_envs (int): Number of parallel environments (default is 1).
             device: JAX device to run the computations on.
         """
-        self.board_size = board_size
-        self.num_envs = num_envs
-        self.device = device
-        self.win_length = 5
+        self.board_size = board_size   # The size of each game board (i.e., board_size x board_size)
+        self.num_envs = num_envs       # Number of parallel game instances (environments)
+        self.device = device           # The JAX device on which computations will be performed
+        self.win_length = 5            # Number of consecutive markers needed to win the game
+
+        # The board for all environments is represented as a 3-dimensional array.
+        # Each individual board is initialized as a 2D grid filled with zeros (indicating empty positions).
+        # Shape: (num_envs, board_size, board_size)
         self.board = jnp.zeros(
             (self.num_envs, self.board_size, self.board_size),
             dtype=jnp.int8,
             device=device
         )
-        #extra 0s for convolution
 
-        self.active_boards = jnp.arange(num_envs, dtype=jnp.int32, device=device) #shape: (num_envs,)
-        self.game_over = jnp.zeros((num_envs,), dtype=jnp.bool_, device=device) #shape: (num_envs,)
+        # active_boards: A 1D array holding the indices of the active (ongoing) game boards.
+        # Initially, all boards are active.
+        # Shape: (num_envs,)
+        self.active_boards = jnp.arange(num_envs, dtype=jnp.int32, device=device)
 
-        self.current_player = jnp.ones((num_envs,), dtype=jnp.int8, device=device) #shape: (num_envs,) 1 for black, -1 for white
+        # game_over: A boolean array that indicates whether each environment's game has ended
+        # (due to a win or draw). Initially, all values are False because no game is over.
+        # Shape: (num_envs,)
+        self.game_over = jnp.zeros((num_envs,), dtype=jnp.bool_, device=device)
 
-        # Initialize kernels for win detection
+        # current_player: A 1D array representing the current player's turn for each environment.
+        # A value of 1 indicates that it is Black's turn, and -1 indicates White's turn.
+        # Black always starts first (thus initialized to 1 for all environments).
+        # Shape: (num_envs,)
+        self.current_player = jnp.ones((num_envs,), dtype=jnp.int8, device=device)
+
+        # kernels: Precomputed convolution kernels that are used to detect winning moves.
+        # These kernels cover horizontal, vertical, diagonal, and anti-diagonal directions,
+        # each with a size that matches the number of markers required to win (win_length).
         self.kernels = self._create_kernels()
 
     def to(self,device=jax.devices('cpu')[0]):
@@ -132,7 +148,7 @@ class GomokuEnv:
 
         self.current_player = self.current_player.at[self.active_boards].set(-self.current_player)
 
-        return self.get_state()
+        return self.get_state(),
 
     def check_game_over(self):
         """
