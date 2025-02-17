@@ -50,24 +50,24 @@ class Gomoku:
         win = self._check_win()
         draw = jnp.all(self.board != 0)
 
-        new_done, new_reward, new_current_player = lax.cond(
+        new_done, reward , new_current_player = lax.cond(
             win,
             lambda _: (
                 True,
                 1.0,
-                self.current_player,
+                -self.current_player,
             ),
             lambda _: lax.cond(
                 draw,
                 lambda _: (
                     True,
                     0.0,
-                    self.current_player*-1,
+                    -self.current_player
                 ),
                 lambda _: (
                     False,
                     0.0,
-                    self.current_player * -1,
+                    -self.current_player,
                 ),
                 operand=None
             ),
@@ -83,7 +83,7 @@ class Gomoku:
             if self.done:
                 self.renderer.close()
 
-        return self.board, new_reward, self.done
+        return self.board, reward, self.done
 
     def get_action_mask(self):
         return self.board == 0
