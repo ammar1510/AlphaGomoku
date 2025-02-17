@@ -24,7 +24,7 @@ CHECKPOINT_DIR = f"checkpoints/{BOARD_SIZE}x{BOARD_SIZE}"
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 BLACK_CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "black.pkl")
 WHITE_CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "white.pkl")
-CHECKPOINT_INTERVAL = 64
+CHECKPOINT_INTERVAL = 100
 
 @jit
 def discount_rewards(rewards, gamma):
@@ -85,11 +85,9 @@ def run_episode(env, white_actor_critic, black_actor_critic, white_params, black
         obs_jax = jnp.expand_dims(jnp.array(obs, dtype=jnp.float32), axis=0)
         
         if current_player == 1:
-            network_input = obs_jax
-            policy_logits, value = black_actor_critic.apply(black_params, network_input)
+            policy_logits, value = black_actor_critic.apply(black_params, obs_jax)
         else:
-            network_input = -obs_jax
-            policy_logits, value = white_actor_critic.apply(white_params, network_input)
+            policy_logits, value = white_actor_critic.apply(white_params, obs_jax)
         value = value[0]
         policy_logits = policy_logits[0]
 
@@ -133,7 +131,7 @@ def run_episode(env, white_actor_critic, black_actor_critic, white_params, black
             if current_player == 1:
                 trajectory_black["rewards"].append(reward)
             else:
-                trajectory_white["rewards"].append(-reward)
+                trajectory_white["rewards"].append(reward)
     
     return trajectory_white, trajectory_black, rng
 
@@ -241,7 +239,7 @@ def main():
     black_params = black_actor_critic.init(rng, dummy_input)
     
     optimizer = optax.adam(LEARNING_RATE)
-    # Load checkpoints: Black first then White.
+
     black_checkpoint_params, start_episode_black = load_checkpoint(BLACK_CHECKPOINT_PATH, "black")
     white_checkpoint_params, start_episode_white = load_checkpoint(WHITE_CHECKPOINT_PATH, "white")
     
