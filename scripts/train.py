@@ -21,11 +21,11 @@ GAMMA = 0.99
 NUM_EPISODES = 50000
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
-RENDER = True
+RENDER = False
 CHECKPOINT_DIR = f"checkpoints/{BOARD_SIZE}x{BOARD_SIZE}"
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "black.pkl")
-CHECKPOINT_INTERVAL = 100
+CHECKPOINT_INTERVAL = 10
 GRAD_CLIP_NORM = 1.0
 
 @jit
@@ -46,7 +46,7 @@ def discount_rewards(rewards, gamma):
             return new_carry, new_carry
         _, discounted_reversed = lax.scan(scan_fn, 0.0, r[::-1])
         return discounted_reversed[::-1]
-    return jax.vmap(discount_single)(rewards)
+    return jax.vmap(discount_single,in_axes=1,out_axes=1)(rewards)
 
 def run_episode(env, actor_critic, params, gamma, rng):
     """
@@ -93,7 +93,7 @@ def run_episode(env, actor_critic, params, gamma, rng):
     #reward -> (T, num_envs)
     #dones -> (T, num_envs)
     #values -> (T, num_envs)
-    trajectory["rewards"] = discount_rewards(jnp.array(trajectory["rewards"]).transpose(1, 0), gamma).transpose(1, 0)
+    trajectory["rewards"] = discount_rewards(jnp.array(trajectory["rewards"]), gamma)
     trajectory["rewards"] = trajectory["rewards"]*env.winners[None,:]
 
     

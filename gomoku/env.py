@@ -34,7 +34,7 @@ class Gomoku:
             self.renderer = GomokuRenderer(self.board_size, CELL_SIZE)
             self._update_human_display()
 
-        return self.board
+        return self.board,self.dones
 
     def step(self, actions): 
         """
