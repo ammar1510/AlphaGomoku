@@ -1,3 +1,21 @@
-#ignore all .pkl files
 *.pkl
+__pycache__/
+**/__pycache__
+*.py[cod]
+*$py.class
+.pytest_cache
+.python-version
+
+
+#virtual environments
+.venv/
+
+#jupyter notebooks
+.ipynb_checkpoints
+
+#ide configs
+.vscode
+
+#project configs
+alphagomoku.egg-info
 

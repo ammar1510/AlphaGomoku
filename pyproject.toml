@@ -1,7 +1,19 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "alphagomoku"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.12"
-dependencies = []
+description = "AlphaGo-inspired implementation for Gomoku"
+requires-python = ">=3.8"
+dependencies = [
+    "jax",
+    "flax", 
+    "optax",
+    "numpy"
+]
+
+# This is critical - it tells Python which directories should be treated as packages
+[tool.setuptools]
+packages = ["policy", "gomoku", "scripts"]

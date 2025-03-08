@@ -7,16 +7,17 @@ WIN_LENGTH = 5
 CELL_SIZE = 40  # Constant cell size
 
 class Gomoku:
-    def __init__(self, board_size=15, device=None, mode="train"):
+    def __init__(self, board_size=15, device=None, num_boards=1, mode="train"):
         self.board_size = board_size
-        self.current_player = 1  # 1 for black, -1 for white
-        self.board = jnp.zeros((board_size, board_size), dtype=jnp.float32)
-        self.done = False
+        self.num_boards = num_boards
+        self.current_player = jnp.ones((num_boards), dtype=jnp.int32)  # 1 for black, -1 for white
+        self.board = jnp.zeros((num_boards, board_size, board_size), dtype=jnp.float32)
+        self.dones = jnp.zeros((num_boards), dtype=jnp.bool_)
+        self.winners = jnp.zeros((num_boards), dtype=jnp.int32)
         self.seed = None
         self.kernels = self._create_kernels()
         self.device = device
         self.mode = mode
-        self.cell_size = CELL_SIZE
 
 
     def reset(self, seed=None):
@@ -24,66 +25,52 @@ class Gomoku:
         Resets the game environment to its initial state.
         """
         self.seed = seed
-        self.board = jnp.zeros((self.board_size, self.board_size), dtype=jnp.float32)
-        self.current_player = 1
-        self.done = False
+        self.board = jnp.zeros((self.num_boards, self.board_size, self.board_size), dtype=jnp.float32)
+        self.current_player = jnp.ones((self.num_boards), dtype=jnp.int32)
+        self.dones = jnp.zeros((self.num_boards), dtype=jnp.bool_)
+        self.winners = jnp.zeros((self.num_boards), dtype=jnp.int32)
 
         if self.mode == "human":
-            self.renderer = GomokuRenderer(self.board_size, self.cell_size)
+            self.renderer = GomokuRenderer(self.board_size, CELL_SIZE)
             self._update_human_display()
 
-        return self.board
+        return self.board,self.dones
 
-    def step(self, action):
+    def step(self, actions): 
         """
-        Executes one step in the Gomoku game in a JAX-friendly manner.
-        Uses jax.lax.cond to avoid Python boolean conversion of traced booleans.
-        Assumes that the provided action is legal.
+        Executes one step in the Gomoku game in JIT-compatible manner.
+        Args: actions: jnp.ndarray with shape (num_boards,2)
+        Returns:
+            board: jnp.ndarray with shape (num_boards, board_size, board_size)
+            rewards: jnp.ndarray with shape (num_boards,)
+            dones: jnp.ndarray with shape (num_boards,)
         """
-        row, col = action
-
-        # Update the board immutably.
-        new_board = self.board.at[row, col].set(self.current_player)
-        self.board = new_board
+        rows, cols = actions.T
+        idx = jnp.arange(self.num_boards)
+        action_mask = jnp.logical_not(self.dones)&(self.board[idx, rows, cols]==0)
+        active_idx = jnp.where(action_mask)[0]
+        self.board = self.board.at[active_idx, rows[active_idx], cols[active_idx]].set(self.current_player[active_idx])
 
         # Compute win and draw conditions as JAX booleans.
-        win = self._check_win()
-        draw = jnp.all(self.board != 0)
+        wins = self._check_win()
+        self.winners = jnp.where(wins, self.current_player, self.winners)
+        
+        #if not (won on this iteration or done previously)-> draw
+        draws = jnp.all(self.board != 0, axis=(1,2)) & ~(wins | self.dones)
 
-        new_done, reward , new_current_player = lax.cond(
-            win,
-            lambda _: (
-                True,
-                1.0,
-                -self.current_player,
-            ),
-            lambda _: lax.cond(
-                draw,
-                lambda _: (
-                    True,
-                    0.0,
-                    -self.current_player
-                ),
-                lambda _: (
-                    False,
-                    0.0,
-                    -self.current_player,
-                ),
-                operand=None
-            ),
-            operand=None
-        )
-
-        self.done = new_done
-        self.current_player = new_current_player
+        rewards = jnp.where(wins, self.current_player, 0.0)  # reward only for current wins
+        self.current_player = -self.current_player
+        self.dones = (self.dones | wins | draws)
 
         if self.mode == "human":
             self._update_human_display()
             self.renderer.pause()
-            if self.done:
+            if self.dones:
                 self.renderer.close()
 
-        return self.board, reward, self.done
+        # Properly reshape current_player for broadcasting
+        current_player_reshaped = self.current_player[:, jnp.newaxis, jnp.newaxis]
+        return self.board*current_player_reshaped, rewards, self.dones
 
     def get_action_mask(self):
         return self.board == 0
@@ -94,7 +81,9 @@ class Gomoku:
         Uses convolution with predefined kernels.
         Returns a JAX boolean (without using .item()).
         """
-        player_boards = (self.board * self.current_player)[jnp.newaxis, :, :, jnp.newaxis]
+        # Add necessary dimensions to current_player for broadcasting
+        current_player_reshaped = self.current_player[:, jnp.newaxis, jnp.newaxis]
+        player_boards = (self.board * current_player_reshaped)[:, :, :, jnp.newaxis]
         padding = ((WIN_LENGTH - 1, WIN_LENGTH - 1), (WIN_LENGTH - 1, WIN_LENGTH - 1))
 
         conv_output = lax.conv_general_dilated(
@@ -105,7 +94,7 @@ class Gomoku:
             dimension_numbers=('NHWC', 'HWIO', 'NHWC'),
         )
         win_condition = conv_output == WIN_LENGTH
-        win = jnp.any(win_condition)
+        win = jnp.any(win_condition,axis=(-3,-2,-1)) & ~self.dones
         return win  # Do not call .item(), just return the traced value
 
     def _create_kernels(self):
@@ -126,7 +115,7 @@ class Gomoku:
         This method should not be used when running jitted training loops.
         """
         if self.mode == "human":
-            board_list = self.board.tolist()  # Safe since human mode is non-jitted.
+            board_list = self.board.tolist()[0]
             self.renderer.render_board(board_list)
             self.renderer.process_events()
 
