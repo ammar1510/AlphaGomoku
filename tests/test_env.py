@@ -1,165 +1,280 @@
+from re import T
 import pytest
-import numpy as np
 import jax
 import jax.numpy as jnp
-from gomoku.env import Gomoku, WIN_LENGTH, CELL_SIZE
+import numpy as np
+from gomoku.env import Gomoku
 
-# Dummy renderer to avoid opening an actual window in tests.
-class DummyRenderer:
-    def __init__(self):
-        self.render_called = False
-        self.events_called = False
-        self.pause_called = False
-        self.close_called = False
-
-    def render_board(self, board):
-        self.render_called = True
-
-    def process_events(self):
-        self.events_called = True
-
-    def pause(self):
-        self.pause_called = True
-
-    def close(self):
-        self.close_called = True
-
-# ---------------------------
-# Fixtures
-# ---------------------------
-@pytest.fixture
-def env_train():
-    # Create an environment in train mode (no renderer)
-    env = Gomoku(board_size=9, mode="train")
-    env.reset()
-    return env
-
-@pytest.fixture
-def env_human(monkeypatch):
-    # Instead of creating an actual renderer, override GomokuRenderer in the env module.
-    dummy = DummyRenderer()
-    monkeypatch.setattr("env.GomokuRenderer", lambda board_size, cell_size: dummy)
-    env = Gomoku(board_size=9, mode="human")
-    env.reset()  # This creates the renderer, which now is our dummy.
-    return env, dummy
-
-# ---------------------------
-# Test Reset and Initialization
-# ---------------------------
-def test_reset_initialization():
-    env = Gomoku(board_size=9, mode="train")
-    board, info = env.reset()
-    # Board should be 9x9 zeros.
-    np_board = np.array(board)
-    assert np_board.shape == (9, 9)
-    assert np.all(np_board == 0)
-    # Current player is reset to 1 and game is not over.
-    assert env.current_player == 1
-    assert env.done is False
-
-# ---------------------------
-# Test Action Mask
-# ---------------------------
-def test_get_action_mask(env_train):
-    env = env_train
+def test_init():
+    """Test initialization with different parameters"""
+    # Default initialization
+    env = Gomoku()
+    assert env.board_size == 15
+    assert env.num_boards == 1
+    assert env.mode == "train"
+    
+    # Custom parameters for training mode
+    env = Gomoku(board_size=10, num_boards=5, mode="train")
+    assert env.board_size == 10
+    assert env.num_boards == 5
+    assert env.mode == "train"
+    assert env.board.shape == (5, 10, 10)
+    
+    # Human mode should always use num_boards=1
+    env = Gomoku(board_size=10, num_boards=1, mode="human")
+    assert env.board_size == 10
+    assert env.num_boards == 1
+    assert env.mode == "human"
+    assert env.board.shape == (1, 10, 10)
+    
+def test_reset():
+    """Test reset function"""
+    env = Gomoku(board_size=10, num_boards=2)
+    
+    # Make some moves to change the state
+    actions = jnp.array([[1, 1], [2, 2]])
+    env.step(actions)
+    
+    # Reset and check if state is cleared
+    board = env.reset()
+    assert jnp.all(env.board == 0)
+    assert jnp.all(env.current_player == 1)
+    assert jnp.all(env.dones == False)
+    assert jnp.all(env.winners == 0)
+    assert board.shape == (2, 10, 10)
+    
+def test_step_valid_move():
+    """Test making valid moves"""
+    env = Gomoku(board_size=10, num_boards=1)
+    
+    # First player (black) plays at (1, 1)
+    actions = jnp.array([[1, 1]])
+    next_board, rewards, dones = env.step(actions)
+    
+    # Check board state
+    assert env.board[0, 1, 1] == 1  # Black stone placed
+    assert jnp.all(env.current_player == -1)  # Now white's turn
+    assert jnp.all(rewards == 0)  # No win yet
+    assert jnp.all(dones == False)  # Game not over
+    
+    # Second player (white) plays at (2, 2)
+    actions = jnp.array([[2, 2]])
+    next_board, rewards, dones = env.step(actions)
+    
+    # Check board state
+    assert env.board[0, 2, 2] == -1  # White stone placed
+    assert jnp.all(env.current_player == 1)  # Back to black's turn
+    
+def test_step_occupied_cell():
+    """Test attempting to play on an occupied cell"""
+    env = Gomoku(board_size=10, num_boards=1)
+    
+    # First player plays at (1, 1)
+    actions = jnp.array([[1, 1]])
+    env.step(actions)
+    
+    # Second player tries to play at the same location
+    actions = jnp.array([[1, 1]])
+    next_board, rewards, dones = env.step(actions)
+    
+    # Check that the move wasn't made (cell still contains first player's stone)
+    assert env.board[0, 1, 1] == 1
+    
+def test_horizontal_win():
+    """Test horizontal win detection"""
+    env = Gomoku(board_size=10, num_boards=1)
+    
+    # Black places 5 stones in a row horizontally
+    for i in range(5):
+        actions = jnp.array([[1, i]])
+        next_board, rewards, dones = env.step(actions)
+        
+        # White's non-interfering moves
+        if i < 4:  # Skip last white move as game ends
+            actions = jnp.array([[2, i]])
+            next_board, rewards, dones = env.step(actions)
+    
+    # Check win condition
+    assert jnp.all(dones == True)
+    assert env.winners[0] == 1  # Black wins
+    assert rewards[0] == 1  # Reward for winning
+    
+def test_vertical_win():
+    """Test vertical win detection"""
+    env = Gomoku(board_size=10, num_boards=1)
+    
+    # Black places 5 stones in a row vertically
+    for i in range(5):
+        actions = jnp.array([[i, 1]])
+        next_board, rewards, dones = env.step(actions)
+        
+        # White's non-interfering moves
+        if i < 4:  # Skip last white move as game ends
+            actions = jnp.array([[i, 2]])
+            next_board, rewards, dones = env.step(actions)
+    
+    # Check win condition
+    assert jnp.all(dones == True)
+    assert env.winners[0] == 1  # Black wins
+    
+def test_diagonal_win():
+    """Test diagonal win detection"""
+    env = Gomoku(board_size=10, num_boards=1)
+    
+    # Black places 5 stones in a row diagonally
+    for i in range(5):
+        actions = jnp.array([[i, i]])
+        next_board, rewards, dones = env.step(actions)
+        
+        # White's non-interfering moves
+        if i < 4:  # Skip last white move as game ends
+            actions = jnp.array([[i, i+1]])
+            next_board, rewards, dones = env.step(actions)
+    
+    # Check win condition
+    assert jnp.all(dones == True)
+    assert env.winners[0] == 1  # Black wins
+    
+def test_anti_diagonal_win():
+    """Test anti-diagonal win detection"""
+    env = Gomoku(board_size=10, num_boards=1)
+    
+    # Black places 5 stones in a row anti-diagonally
+    for i in range(5):
+        actions = jnp.array([[i, 4-i]])
+        next_board, rewards, dones = env.step(actions)
+        
+        # White's non-interfering moves
+        if i < 4:  # Skip last white move as game ends
+            actions = jnp.array([[i, 5-i]])
+            next_board, rewards, dones = env.step(actions)
+    
+    # Check win condition
+    assert jnp.all(dones == True)
+    assert env.winners[0] == 1  # Black wins
+    
+def test_draw():
+    """Test draw condition"""
+    env = Gomoku(board_size=3, num_boards=1)  # Small board for quick draw
+    
+    # Fill board in a way that neither player wins
+    # Row 0: B W B
+    # Row 1: W B W
+    # Row 2: W B W
+    moves = [
+        (0, 0), (0, 1), (0, 2),
+        (1, 1), (1, 0), (1, 2),
+        (2, 1), (2, 0), (2, 2)
+    ]
+    
+    for row, col in moves:
+        actions = jnp.array([[row, col]])
+        next_board, rewards, dones = env.step(actions)
+    
+    # Check draw condition
+    assert jnp.all(dones == True)
+    assert env.winners[0] == 0  # No winner
+    assert rewards[0] == 0  # No reward for draw
+    
+def test_action_mask():
+    """Test get_action_mask function"""
+    env = Gomoku(board_size=5, num_boards=1)
+    
+    # Initially all positions should be valid
     mask = env.get_action_mask()
-    np_mask = np.array(mask)
-    # All positions available at reset.
-    assert np.all(np_mask)
-    # Place a stone in the middle.
-    env.board = env.board.at[4, 4].set(1)
+    assert jnp.all(mask == True)
+    
+    # Make some moves
+    actions = jnp.array([[1, 1]])
+    env.step(actions)
+    
+    actions = jnp.array([[2, 2]])
+    env.step(actions)
+    
+    # Check mask again
     mask = env.get_action_mask()
-    np_mask = np.array(mask)
-    # The (4,4) spot is now unavailable.
-    assert np_mask[4, 4] is False
-    assert np.count_nonzero(np_mask) == 9 * 9 - 1
-
-# ---------------------------
-# Test Legal Move (step)
-# ---------------------------
-def test_step_valid_move(env_train):
-    env = env_train
-    initial_player = env.current_player
-    new_board, reward, done, info = env.step((0, 0))
-    board_np = np.array(new_board)
-    # The move should set (0,0) to the current player's value.
-    assert board_np[0, 0] == initial_player
-    # With only one move, there is no win or draw.
-    assert reward == 0.0
-    assert done is False
-    assert env.current_player == -initial_player  # Player should flip.
-
-# ---------------------------
-# Test Illegal Move
-# ---------------------------
-def test_step_illegal_move(env_train):
-    env = env_train
-    env.step((0, 0))
-    with pytest.raises(ValueError, match="Illegal move"):
-        env.step((0, 0))
-
-# ---------------------------
-# Test Win Condition
-# ---------------------------
-def test_win_condition():
-    env = Gomoku(board_size=9, mode="train")
-    env.reset()
-    # Simulate a win by manually setting five consecutive stones
-    for col in range(WIN_LENGTH):
-        env.board = env.board.at[0, col].set(env.current_player)
-    # The _check_win should return True from the current player's perspective.
-    assert env._check_win() is True
-
-    # Also test that step() detects win.
-    env.reset()
-    # Force the board so that placing at (0, WIN_LENGTH-1) wins the game.
-    env.current_player = 1
-    for col in range(WIN_LENGTH - 1):
-        env.board = env.board.at[0, col].set(1)
-    new_board, reward, done, info = env.step((0, WIN_LENGTH - 1))
-    assert done is True
-    assert info.get("result") == "win"
-    assert info.get("winner") == 1
-    assert reward == 1.0  # Since current player 1 wins.
-
-# ---------------------------
-# Test Draw Condition
-# ---------------------------
-def test_draw_condition():
-    # Use a small board (e.g., 3x3) where a win is impossible (WIN_LENGTH=5) so that full board implies a draw.
-    env = Gomoku(board_size=3, mode="train")
-    env.reset()
-    # Fill the board manually with alternating moves.
-    moves = [(i, j) for i in range(3) for j in range(3)]
-    current = 1
-    for move in moves[:-1]:
-        env.board = env.board.at[move[0], move[1]].set(current)
-        current *= -1
-    # The final move should trigger a draw.
-    new_board, reward, done, info = env.step(moves[-1])
-    assert done is True
-    assert info.get("result") == "draw"
-
-# ---------------------------
-# Test to() Method (Device Switching)
-# ---------------------------
-def test_to_device(env_train):
-    env = env_train
-    # Capture the current device (on CPU, this should be "cpu")
-    initial_device = env.board.device_buffer.device()
-    # Call to() with the same device.
-    env.to(env.device)
-    # Makes sure the board and kernels are on the expected device.
-    assert env.board.device_buffer.device() == env.device
-    assert env.kernels.device_buffer.device() == env.device
-
-# ---------------------------
-# Test Human Mode Rendering
-# ---------------------------
-def test_human_mode(env_human):
-    env, dummy = env_human
-    # When reset() is called in human mode, _update_human_display() is invoked,
-    # which in turn calls renderer.render_board() and renderer.process_events()
-    # Our dummy renderer should reflect that.
-    assert dummy.render_called is True
-    assert dummy.events_called is True 
+    assert mask[0, 1, 1] == False  # Occupied by first move
+    assert mask[0, 2, 2] == False  # Occupied by second move
+    assert mask[0, 0, 0] == True   # Still empty
+    
+def test_multiple_boards():
+    """Test running multiple boards in parallel"""
+    num_boards = 3
+    env = Gomoku(board_size=10, num_boards=num_boards)
+    
+    # Make different moves on each board
+    actions = jnp.array([
+        [1, 1],  # Board 0
+        [2, 2],  # Board 1
+        [3, 3]   # Board 2
+    ])
+    
+    next_board, rewards, dones = env.step(actions)
+    
+    # Check each board state
+    assert env.board[0, 1, 1] == 1
+    assert env.board[1, 2, 2] == 1
+    assert env.board[2, 3, 3] == 1
+    
+    # Create wins on boards 0 and 2 only, with no win on board 1
+    for i in range(1, 6):
+        # White moves for all boards
+        if i < 5:
+            white_actions = jnp.array([
+                [2, i],      # Board 0
+                [4+i, 4-i],  # Board 1 
+                [4+i, 3]     # Board 2
+            ])
+            next_board, rewards, dones = env.step(white_actions)
+        
+        # Black moves for all boards
+        black_actions = jnp.array([
+            [1, 1+i],         # Board 0 - continuing horizontal line for win
+            [i%3 + 1, i+3],   # Board 1 - scattered pattern that won't win 
+            [3, 3+i]          # Board 2 - horizontal line for win
+        ])
+        next_board, rewards, dones = env.step(black_actions)
+    
+    # Print the final board state
+    print("\nFinal board states:")
+    for board_idx in range(num_boards):
+        print(f"\nBoard {board_idx}:")
+        board = np.array(env.board[board_idx])  # Convert to numpy for easier printing
+        for row in range(env.board_size):
+            row_str = ""
+            for col in range(env.board_size):
+                cell = board[row, col]
+                if cell == 1:
+                    row_str += "X "  # Black
+                elif cell == -1:
+                    row_str += "O "  # White
+                else:
+                    row_str += ". "  # Empty
+            print(row_str)
+    
+    # Check win conditions
+    assert dones[0] == True   # Board 0 should be done
+    assert dones[1] == False  # Board 1 should NOT be done
+    assert dones[2] == True   # Board 2 should be done
+    assert env.winners[0] == 1  # Black won on board 0
+    assert env.winners[1] == 0  # No winner on board 1
+    assert env.winners[2] == 1  # Black won on board 2
+    
+def test_board_normalization():
+    """Test board normalization from current player's perspective"""
+    env = Gomoku(board_size=5, num_boards=1)
+    
+    # Black plays at (1, 1)
+    actions = jnp.array([[1, 1]])
+    next_board, _, _ = env.step(actions)
+    
+    # Board from white's perspective: black's stone should be -1
+    assert next_board[0, 1, 1] == -1
+    
+    # White plays at (2, 2)
+    actions = jnp.array([[2, 2]])
+    next_board, _, _ = env.step(actions)
+    
+    # Board from black's perspective: white's stone should be -1, black's stone should be 1
+    assert next_board[0, 1, 1] == 1
+    assert next_board[0, 2, 2] == -1

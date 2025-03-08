@@ -3,8 +3,8 @@ from flax import linen as nn
 import jax
 
 class ActorCritic(nn.Module):
-    board_size: int  # e.g. 15
-    channels: int = 1  # Number of input channels (for a plain board image)
+    board_size: int
+    channels: int = 1
 
     @nn.compact
     def __call__(self, x):
@@ -25,29 +25,29 @@ class ActorCritic(nn.Module):
         elif x.ndim != 4:
             raise ValueError(f"Expected input to have 3 or 4 dimensions, got shape {x.shape}")
 
-        # Shared Convolutional Backbone
-        x = nn.Conv(features=64, kernel_size=(3, 3), padding="SAME")(x)
-        x = nn.relu(x)
-        x = nn.Conv(features=64, kernel_size=(3, 3), padding="SAME")(x)
-        x = nn.relu(x)
         x = nn.Conv(features=64, kernel_size=(3, 3), padding="SAME")(x)
         x = nn.relu(x)
 
-        # Actor Head:
-        # A 1x1 convolution reduces the features to one logit per board cell.
+        residual = x
+        y = nn.Conv(features=64, kernel_size=(3, 3), padding="SAME")(x)
+        y = nn.relu(y)
+        x = residual + y  
+
+        residual = x
+        y = nn.Conv(features=64, kernel_size=(3, 3), padding="SAME")(x)
+        y = nn.relu(y)
+        x = residual + y  
+
         actor = nn.Conv(features=1, kernel_size=(1, 1), padding="SAME")(x)
-        # Squeeze out the channel dimension, resulting in (batch, board_size, board_size)
         policy_logits = jnp.squeeze(actor, axis=-1) 
 
-        # Critic Head:
-        # Global average pooling over the board dimensions.
-        critic = nn.avg_pool(x, window_shape=(self.board_size, self.board_size),
-                             strides=(1, 1), padding="VALID")
+        critic = nn.avg_pool(
+            x, window_shape=(self.board_size, self.board_size), strides=(1, 1), padding="VALID")
         critic = jnp.squeeze(critic, axis=(1, 2))
         critic = nn.Dense(features=256)(critic)
         critic = nn.relu(critic)
         critic = nn.Dense(features=1)(critic)
-        value = jnp.squeeze(critic, axis=-1)  # shape: (batch,)
+        value = jnp.squeeze(critic, axis=-1)
 
         return policy_logits, value 
 
@@ -64,10 +64,8 @@ class ActorCritic(nn.Module):
             jnp.ndarray: Selected moves as an array with shape (batch, 2).
         """
         batch_size, board_size, _ = logits.shape
-        # Flatten spatial dimensions for sampling.
         flat_logits = logits.reshape((batch_size, board_size * board_size))
         flat_actions = jax.random.categorical(rng, flat_logits, axis=-1)
-        # Convert flat indices into (row, col) pairs.
         rows = flat_actions // board_size
         cols = flat_actions % board_size
-        return jnp.array(list(zip(rows, cols)))
+        return jnp.stack([rows, cols], axis=1)

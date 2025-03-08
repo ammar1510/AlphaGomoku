@@ -16,127 +16,126 @@ logging.basicConfig(
 )
 
 BOARD_SIZE = 9
-LEARNING_RATE = 4e-5
+NUM_BOARDS = 256
 GAMMA = 0.99
 NUM_EPISODES = 50000
-RENDER = False
+LEARNING_RATE = 1e-4
+WEIGHT_DECAY = 1e-4
+RENDER = True
 CHECKPOINT_DIR = f"checkpoints/{BOARD_SIZE}x{BOARD_SIZE}"
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-BLACK_CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "black.pkl")
-WHITE_CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "white.pkl")
+CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "black.pkl")
 CHECKPOINT_INTERVAL = 100
+GRAD_CLIP_NORM = 1.0
 
 @jit
 def discount_rewards(rewards, gamma):
     """
-    Calculate discounted rewards.
-    
+    Calculate discounted rewards for batched trajectories.
+
     Args:
-      rewards: list/array of rewards.
+      rewards: a 2D jnp.array with shape (batch, T)
       gamma: discount factor.
       
     Returns:
-      jnp.array of discounted rewards.
+      A jnp.array of discounted rewards with the same shape as `rewards`.
     """
-    rewards = jnp.asarray(rewards)
-    
-    def scan_fn(carry, reward):
-        new_carry = reward + gamma * carry
-        return new_carry, new_carry
-    
-    _, discounted_reversed = lax.scan(scan_fn, 0.0, rewards[::-1])
-    return discounted_reversed[::-1]
+    def discount_single(r):
+        def scan_fn(carry, reward):
+            new_carry = reward + gamma * carry
+            return new_carry, new_carry
+        _, discounted_reversed = lax.scan(scan_fn, 0.0, r[::-1])
+        return discounted_reversed[::-1]
+    return jax.vmap(discount_single)(rewards)
 
-def run_episode(env, white_actor_critic, black_actor_critic, white_params, black_params, rng):
+def run_episode(env, actor_critic, params, gamma, rng):
     """
-    Run one episode.
+    Runs one episode using a single shared model for both players.
     
     Args:
-      env: Gomoku environment.
-      white_actor_critic: white network instance.
-      black_actor_critic: black network instance.
-      white_params: white network parameters.
-      black_params: black network parameters.
+      env: the Gomoku environment.
+      actor_critic: the single shared ActorCritic model.
+      params: the shared parameters.
       rng: JAX RNG key.
-      
+    
     Returns:
-      (trajectory_white, trajectory_black, updated_rng)
+      trajectory: dict with keys ("obs", "actions", "rewards", "values", "dones")
+      rng: updated RNG key.
     """
-    obs = env.reset()
-    done = False
-
-    trajectory_white = {
+    obs, dones = env.reset()
+    
+    trajectory = {
         "obs": [],
         "actions": [],
         "rewards": [],
-        "log_probs": [],
-        "values": []
-    }
-    trajectory_black = {
-        "obs": [],
-        "actions": [],
-        "rewards": [],
-        "log_probs": [],
-        "values": []
+        "values": [],
+        "dones": []
     }
     
-    while not done:
-        current_player = env.current_player
-        obs_jax = jnp.expand_dims(jnp.array(obs, dtype=jnp.float32), axis=0)
-        
-        if current_player == 1:
-            policy_logits, value = black_actor_critic.apply(black_params, obs_jax)
-        else:
-            policy_logits, value = white_actor_critic.apply(white_params, obs_jax)
-        value = value[0]
-        policy_logits = policy_logits[0]
-
+    while not jnp.all(dones):
+        policy_logits, value = actor_critic.apply(params, obs)
         action_mask = env.get_action_mask()
         logits = jnp.where(action_mask, policy_logits, -jnp.inf)
         
-        rng, black_subkey, white_subkey = jax.random.split(rng, 3)
-
-        if current_player == 1:
-            sampled = black_actor_critic.sample_action(logits[None, ...], black_subkey)
-        else:
-            sampled = white_actor_critic.sample_action(logits[None, ...], white_subkey)
-        action = sampled[0]
+        rng, subkey = jax.random.split(rng)
+        action = actor_critic.sample_action(logits, subkey)
         
-        flat_logits = logits.reshape(-1)
-        flat_log_probs = jax.nn.log_softmax(flat_logits)
-        flat_index = jnp.int32(action[0] * BOARD_SIZE + action[1])
-        log_prob = flat_log_probs[flat_index]
-
-        if current_player == 1:
-            trajectory_black["obs"].append(jnp.array(obs, dtype=jnp.float32))
-            trajectory_black["actions"].append((jnp.int32(action[0]), jnp.int32(action[1])))
-            trajectory_black["log_probs"].append(log_prob)
-            trajectory_black["values"].append(value)
-        else:
-            trajectory_white["obs"].append(jnp.array(obs, dtype=jnp.float32))
-            trajectory_white["actions"].append((jnp.int32(action[0]), jnp.int32(action[1])))
-            trajectory_white["log_probs"].append(log_prob)
-            trajectory_white["values"].append(value)
+        trajectory["obs"].append(obs)
+        trajectory["actions"].append(action)
+        trajectory["values"].append(value)
+        trajectory["dones"].append(dones)
         
-        obs, reward, done = env.step((jnp.int32(action[0]), jnp.int32(action[1])))
+        obs, rewards, dones = env.step(action)
+        trajectory["rewards"].append(rewards)
 
-        if done:
-            if current_player == 1:
-                trajectory_black["rewards"].append(reward)
-                trajectory_white["rewards"][-1] = -reward * GAMMA
-            else:
-                trajectory_white["rewards"].append(reward)  
-                trajectory_black["rewards"][-1] = -reward * GAMMA
-        else:
-            if current_player == 1:
-                trajectory_black["rewards"].append(reward)
-            else:
-                trajectory_white["rewards"].append(reward)
+    #obs -> (T, num_envs, board_size, board_size)
+    #action -> (T, num_envs, 2)
+    #reward -> (T, num_envs)
+    #dones -> (T, num_envs)
+    #values -> (T, num_envs)
+    trajectory["rewards"] = discount_rewards(jnp.array(trajectory["rewards"]).transpose(1, 0), gamma).transpose(1, 0)
+    trajectory["rewards"] = trajectory["rewards"]*env.winners[None,:]
+
     
-    return trajectory_white, trajectory_black, rng
+    trajectory = preprocess_trajectory(trajectory)
+    return trajectory, rng
+
+
+def preprocess_trajectory(trajectory):
+    """
+    Args:
+        trajectory: dict containing keys:
+            "obs": jnp.ndarray with shape (T, num_envs, ...) e.g. (T, num_envs, board_size, board_size)
+            "actions": jnp.ndarray with shape (T, num_envs, 2)
+            "log_probs": jnp.ndarray with shape (T, num_envs)
+            "rewards": jnp.ndarray with shape (T, num_envs)
+            "dones": jnp.ndarray with shape (T, num_envs), where True indicates the episode is done.
+
+    Returns:
+        A dict with keys "obs", "actions", "log_probs", and "rewards"
+        containing the valid, concatenated trajectory data from all environments.
+    """
+
+    trajectory["obs"] = jnp.array(trajectory["obs"])
+    trajectory["actions"] = jnp.array(trajectory["actions"])
+    trajectory["rewards"] = jnp.array(trajectory["rewards"])
+    trajectory["dones"] = jnp.array(trajectory["dones"])
+
+    T, num_envs = trajectory["obs"].shape[0], trajectory["obs"].shape[1]
+    indices = jnp.argmax(trajectory["dones"], axis=0)
+    mask = jnp.arange(T)[:, None] <= indices[None, :]
+    valid_obs = trajectory["obs"][mask] #(T*num_envs, board_size, board_size)
+    valid_actions = trajectory["actions"][mask]   #(T*num_envs,2)
+    valid_rewards = trajectory["rewards"][mask] #(T*num_envs)
+
+    return {
+        "obs": valid_obs,
+        "actions": valid_actions,
+        "rewards": valid_rewards
+    }
 
 @partial(jax.jit, static_argnums=(3, 4))
-def train_step(params, opt_state, trajectory, actor_critic, optimizer, gamma):
+def train_step(params, opt_state, trajectory, actor_critic, optimizer):
     """
     Perform one training update.
     
@@ -146,18 +145,16 @@ def train_step(params, opt_state, trajectory, actor_critic, optimizer, gamma):
       trajectory: collected trajectory.
       actor_critic: network instance.
       optimizer: optax optimizer.
-      gamma: discount factor.
-      
     Returns:
       (updated_params, updated_opt_state, loss, aux, grad_norm)
     """
-    returns = discount_rewards(jnp.array(trajectory["rewards"]), gamma)
+    returns = trajectory["rewards"]
     returns_mean = returns.mean()
     returns_std = returns.std() + 1e-8
     normalized_returns = (returns - returns_mean) / returns_std
 
     def loss_fn(params):
-        obs = jnp.stack(trajectory["obs"], axis=0)
+        obs = trajectory["obs"]
         actions = jnp.array([a[0] * BOARD_SIZE + a[1] for a in trajectory["actions"]])
         logits, values = actor_critic.apply(params, obs)
         T = obs.shape[0]
@@ -178,7 +175,7 @@ def train_step(params, opt_state, trajectory, actor_critic, optimizer, gamma):
     (loss, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
     grads = jax.tree_util.tree_map(lambda g, p: jnp.zeros_like(p) if g is None else g, grads, params)
     grad_norm = optax.global_norm(grads)
-    updates, opt_state = optimizer.update(grads, opt_state)
+    updates, opt_state = optimizer.update(grads, opt_state, params)
     params = optax.apply_updates(params, updates)
     return params, opt_state, loss, aux, grad_norm
 
@@ -222,68 +219,53 @@ def load_checkpoint(checkpoint_path, player):
 
 def main():
     """
-    Main training loop.
-    
-    Args: None.
-    
-    Returns: None.
+    Main training loop using a single shared model for both players.
     """
-    logging.info("Initializing environment and models.")
-    env = Gomoku(board_size=BOARD_SIZE, mode="human" if RENDER else "train")
-    white_actor_critic = ActorCritic(board_size=BOARD_SIZE)
-    black_actor_critic = ActorCritic(board_size=BOARD_SIZE)
-    
+    logging.info("Initializing environment and model.")
+
+    # When rendering, we only need one board; otherwise, use multiple boards.
+    num_boards = 1 if RENDER else NUM_BOARDS
+    env = Gomoku(board_size=BOARD_SIZE, num_boards=num_boards, mode="human" if RENDER else "train")
+
+    # Create a single shared ActorCritic model.
+    actor_critic = ActorCritic(board_size=BOARD_SIZE)
     rng = jax.random.PRNGKey(0)
     dummy_input = jnp.ones((1, BOARD_SIZE, BOARD_SIZE), dtype=jnp.float32)
-    white_params = white_actor_critic.init(rng, dummy_input)
-    black_params = black_actor_critic.init(rng, dummy_input)
-    
-    optimizer = optax.adam(LEARNING_RATE)
+    params = actor_critic.init(rng, dummy_input)
 
-    black_checkpoint_params, start_episode_black = load_checkpoint(BLACK_CHECKPOINT_PATH, "black")
-    white_checkpoint_params, start_episode_white = load_checkpoint(WHITE_CHECKPOINT_PATH, "white")
-    
-    if white_checkpoint_params is not None and black_checkpoint_params is not None:
-        white_params = white_checkpoint_params
-        black_params = black_checkpoint_params
-        start_episode = min(start_episode_white, start_episode_black)
+    # Create an optimizer with gradient clipping included
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(GRAD_CLIP_NORM),  # First clip gradients
+        optax.adamw(learning_rate=LEARNING_RATE, weight_decay=WEIGHT_DECAY)  # Then apply Adam updates
+    )
+    opt_state = optimizer.init(params)
+
+    # Load checkpoint (using a single shared checkpoint path, e.g., "model").
+    checkpoint_params, start_episode = load_checkpoint(CHECKPOINT_PATH, "model")
+    if checkpoint_params is not None:
+        params = checkpoint_params
         logging.info(f"Resuming training from episode {start_episode}.")
     else:
         start_episode = 1
-        logging.info("No valid checkpoints found. Starting from scratch.")
-    
-    white_opt_state = optimizer.init(white_params)
-    black_opt_state = optimizer.init(black_params)
-    
+        logging.info("No valid checkpoint found. Starting from scratch.")
+
     logging.info("Starting training loop.")
     for episode in range(start_episode, NUM_EPISODES + 1):
-        traj_white, traj_black, rng = run_episode(
-            env, white_actor_critic, black_actor_critic,
-            white_params, black_params, rng
+        traj, rng = run_episode(env, actor_critic, params, GAMMA, rng)
+        # Perform a training step and update parameters.
+        params, opt_state, loss, aux, grad_norm = train_step(params, opt_state, traj, actor_critic, optimizer)
+
+        # Log the loss and gradient norm (and auxiliary losses) for every episode.
+        logging.info(
+            f"Episode {episode}: Loss {loss:.4f} (Actor Loss {aux[0]:.4f}, Critic Loss {aux[1]:.4f}, Entropy Loss {aux[2]:.4f}) | Grad Norm {grad_norm:.4f}"
         )
-        # Train on black first.
-        if len(traj_black["rewards"]) > 0:
-            black_params, black_opt_state, black_loss, black_aux, black_grad_norm = train_step(
-                black_params, black_opt_state, traj_black, black_actor_critic, optimizer, GAMMA
-            )
-        if len(traj_white["rewards"]) > 0:
-            white_params, white_opt_state, white_loss, white_aux, white_grad_norm = train_step(
-                white_params, white_opt_state, traj_white, white_actor_critic, optimizer, GAMMA
-            )
-        
+
+        # Save checkpoint at the defined interval.
         if episode % CHECKPOINT_INTERVAL == 0:
-            logging.info(
-                f"Episode {episode}:"
-                f" Black Loss {black_loss:.4f} (Actor {black_aux[0]:.4f}, Critic {black_aux[1]:.4f}, Entropy {black_aux[2]:.4f}) Grad Norm {black_grad_norm:.4f};"
-                f" White Loss {white_loss:.4f} (Actor {white_aux[0]:.4f}, Critic {white_aux[1]:.4f}, Entropy {white_aux[2]:.4f}) Grad Norm {white_grad_norm:.4f}"
-            )
-            # Save checkpoints: Black first then White.
-            save_checkpoint(black_params, episode, BLACK_CHECKPOINT_PATH, "black")
-            save_checkpoint(white_params, episode, WHITE_CHECKPOINT_PATH, "white")
-    
+            save_checkpoint(params, episode, CHECKPOINT_PATH, "model")
+
     logging.info("Training complete. Saving final model parameters.")
-    save_checkpoint(black_params, NUM_EPISODES, BLACK_CHECKPOINT_PATH, "black")
-    save_checkpoint(white_params, NUM_EPISODES, WHITE_CHECKPOINT_PATH, "white")
-    
+    save_checkpoint(params, NUM_EPISODES, CHECKPOINT_PATH, "model")
+
 if __name__ == "__main__":
     main()
