@@ -3,7 +3,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
-from gomoku.env import Gomoku
+from env.gomoku import Gomoku
 
 def test_init():
     """Test initialization with different parameters"""
@@ -36,12 +36,12 @@ def test_reset():
     env.step(actions)
     
     # Reset and check if state is cleared
-    board = env.reset()
+    env.reset()
     assert jnp.all(env.board == 0)
     assert jnp.all(env.current_player == 1)
     assert jnp.all(env.dones == False)
     assert jnp.all(env.winners == 0)
-    assert board.shape == (2, 10, 10)
+    assert env.board.shape == (2, 10, 10)
     
 def test_step_valid_move():
     """Test making valid moves"""

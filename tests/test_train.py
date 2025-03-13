@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 # Import the functions to be tested.
-from scripts.train import discount_rewards, preprocess_trajectory, run_episode
+from training.train import discount_rewards, preprocess_trajectory, run_episode
 
 def test_discount_rewards():
     """

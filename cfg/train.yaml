@@ -1,0 +1,26 @@
+# Gomoku Training Configuration
+
+# Environment parameters
+board_size: 15
+
+# Model parameters
+num_channels: 1
+
+# Training parameters
+num_boards : 256
+learning_rate: 0.001
+discount: 0.99
+self_play_games: 512
+epochs_per_iteration: 5
+total_iterations: 100
+
+# Evaluation parameters
+eval_frequency: 1
+eval_games: 128
+
+# Checkpointing
+save_frequency: 5
+checkpoint_dir: "checkpoints"
+
+# Miscellaneous
+seed: 42

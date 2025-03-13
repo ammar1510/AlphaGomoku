@@ -14,6 +14,14 @@ dependencies = [
     "numpy"
 ]
 
-# This is critical - it tells Python which directories should be treated as packages
 [tool.setuptools]
-packages = ["policy", "gomoku", "scripts"]
+packages = ["models", "env", "training"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov"
+]
+
+[tool.pytest]
+testpaths = ["tests"]
