@@ -1,27 +1,56 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "alphagomoku"
 version = "0.1.0"
 description = "AlphaGo-inspired implementation for Gomoku"
+readme = "README.md"
 requires-python = ">=3.8"
+license = {text = "MIT"}
 dependencies = [
-    "jax",
-    "flax", 
-    "optax",
-    "numpy"
+    "jax>=0.4.0",
+    "jaxlib>=0.4.0",
+    "flax>=0.7.0", 
+    "optax>=0.1.5",
+    "numpy>=1.24.0",
+    "pyyaml>=6.0.0",
+    "matplotlib>=3.7.0",
 ]
 
+[project.urls]
+"Repository" = "https://github.com/ammar1510/alphagomoku"
+"Documentation" = "https://github.com/ammar1510/alphagomoku#readme"
+
 [tool.setuptools]
-packages = ["models", "env", "training"]
+packages = ["models", "env", "training", "utils"]
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
-    "pytest-cov"
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "jupyter>=1.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
 ]
 
 [tool.pytest]
 testpaths = ["tests"]
+
+[tool.black]
+line-length = 88
+target-version = ["py38"]
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false

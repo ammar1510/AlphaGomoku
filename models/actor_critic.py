@@ -1,6 +1,7 @@
+import jax
 import jax.numpy as jnp
 from flax import linen as nn
-import jax
+
 
 class ActorCritic(nn.Module):
     board_size: int
@@ -20,10 +21,10 @@ class ActorCritic(nn.Module):
         """
         # If the input is missing the channel dimension (e.g. shape == (batch, board_size, board_size)),
         # add it.
-        if x.ndim == 3:
-            x = x[..., None]
-        elif x.ndim != 4:
-            raise ValueError(f"Expected input to have 3 or 4 dimensions, got shape {x.shape}")
+
+        # Add channel dimension if it's missing
+        if len(x.shape) == 3:  # (batch, board_size, board_size)
+            x = jnp.expand_dims(x, axis=-1)
 
         x = nn.Conv(features=64, kernel_size=(3, 3), padding="SAME")(x)
         x = nn.relu(x)
@@ -31,25 +32,29 @@ class ActorCritic(nn.Module):
         residual = x
         y = nn.Conv(features=64, kernel_size=(3, 3), padding="SAME")(x)
         y = nn.relu(y)
-        x = residual + y  
+        x = residual + y
 
         residual = x
         y = nn.Conv(features=64, kernel_size=(3, 3), padding="SAME")(x)
         y = nn.relu(y)
-        x = residual + y  
+        x = residual + y
 
         actor = nn.Conv(features=1, kernel_size=(1, 1), padding="SAME")(x)
-        policy_logits = jnp.squeeze(actor, axis=-1) 
+        policy_logits = jnp.squeeze(actor, axis=-1)
 
         critic = nn.avg_pool(
-            x, window_shape=(self.board_size, self.board_size), strides=(1, 1), padding="VALID")
+            x,
+            window_shape=(self.board_size, self.board_size),
+            strides=(1, 1),
+            padding="VALID",
+        )
         critic = jnp.squeeze(critic, axis=(1, 2))
         critic = nn.Dense(features=256)(critic)
         critic = nn.relu(critic)
         critic = nn.Dense(features=1)(critic)
         value = jnp.squeeze(critic, axis=-1)
 
-        return policy_logits, value 
+        return policy_logits, value
 
     def sample_action(self, logits, rng):
         """

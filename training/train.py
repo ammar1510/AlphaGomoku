@@ -1,559 +1,494 @@
+import logging
 import os
-import time
-import argparse
-import yaml
+import random
 from functools import partial
-from typing import Dict, List, Tuple, Any
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import optax
-import flax
-import flax.linen as nn
-from flax.training import checkpoints, train_state
-import orbax.checkpoint
+from jax import jit, lax
 
-from env.functional_gomoku import (
-    init_env, 
-    reset_env, 
-    step_env, 
-    get_action_mask, 
-    sample_action, 
+from env.functional_gomoku import get_action_mask, init_env, reset_env, step_env
+from models.actor_critic import ActorCritic
+from utils.config import (
+    get_checkpoint_path,
+    list_checkpoints,
+    select_random_checkpoint,
+    load_checkpoint,
+    load_config,
+    save_checkpoint,
+    select_training_checkpoints,
 )
 
-from models.actor_critic import ActorCritic
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
-# Constants
-NUM_HISTORY = 1  # By default, use just the current state (not history)
 
-# Default configuration
-DEFAULT_CONFIG = {
-    # Environment parameters
-    "board_size": 15,
-    
-    # Model parameters
-    "num_channels": 1,
-    
-    # Training parameters
-    "batch_size": 128,
-    "learning_rate": 0.001,
-    "discount": 0.99,
-    "self_play_games": 512,
-    "epochs_per_iteration": 5,
-    "total_iterations": 100,
-    
-    # Evaluation parameters
-    "eval_frequency": 1,
-    "eval_games": 128,
-    
-    # Checkpointing
-    "save_frequency": 5,
-    "checkpoint_dir": "checkpoints",
-    
-    # Miscellaneous
-    "seed": 42
-}
 
-def load_config(config_path):
+def init_train(config):
     """
-    Load configuration from a YAML file with fallback to defaults.
-    
+    Initialize training components.
+
     Args:
-        config_path: Path to the YAML config file
-        
+        config: Configuration dictionary.
+
     Returns:
-        config: Dictionary with configuration parameters
+        tuple: (env, black_actor_critic, black_params, black_opt_state, black_optimizer,
+               white_actor_critic, white_params, white_opt_state, white_optimizer,
+               checkpoint_dir, rng, board_size)
     """
-    # Start with default config
-    config = DEFAULT_CONFIG.copy()
-    
-    # Load and merge values from YAML file
-    if config_path and os.path.exists(config_path):
-        with open(config_path, 'r') as f:
-            yaml_config = yaml.safe_load(f)
-            if yaml_config:
-                config.update(yaml_config)
-                
-    return config
+    board_size = config["board_size"]
+    num_boards = 1 if config["render"] else config["num_boards"]
+    learning_rate = config["learning_rate"]
+    weight_decay = config["weight_decay"]
+    grad_clip_norm = config["grad_clip_norm"]
 
-def create_train_state(rng, model, learning_rate, board_size):
-    """Create initial training state."""
-    # Provide only the current board state
-    dummy_input = jnp.zeros((1, board_size, board_size))
-    params = model.init(rng, dummy_input)
-    
-    tx = optax.adam(learning_rate)
-    
-    return train_state.TrainState.create(
-        apply_fn=model.apply,
-        params=params,
-        tx=tx
-    )
+    checkpoint_dir = get_checkpoint_path(config)
 
-
-def get_observations(board: jnp.ndarray, current_player: jnp.ndarray) -> jnp.ndarray:
-    """
-    Create observation for model input.
-    
-    Args:
-        board: Current board state (num_boards, board_size, board_size)
-        current_player: Current player array (1 for black, -1 for white)
-        
-    Returns:
-        observations: Board states from current player's perspective
-    """
-    # Normalize from perspective of current player
-    current_player_reshaped = current_player[:, jnp.newaxis, jnp.newaxis]
-    observations = board * current_player_reshaped
-    
-    return observations
-
-
-def sample_action_from_policy(env_state, policy_logits, rng, temperature=1.0):
-    """
-    Sample actions from policy logits with temperature and mask for valid actions.
-    
-    Args:
-        env_state: Environment state
-        policy_logits: Policy logits from model (batch_size, board_size, board_size)
-        rng: JAX random key
-        temperature: Temperature for sampling (higher = more exploration)
-        
-    Returns:
-        actions: Selected actions (batch_size, 2)
-        new_rng: Updated random key
-    """
-    board_size = env_state['board_size']
-    num_boards = env_state['num_boards']
-    
-    # Get action mask (True for valid actions)
-    action_mask = get_action_mask(env_state)
-    
-    # Apply temperature and mask invalid actions (set to very negative)
-    scaled_logits = policy_logits / temperature
-    masked_logits = jnp.where(action_mask, scaled_logits, -jnp.inf)
-    
-    # Convert to probabilities (assuming masked_logits is a proper array)
-    # This requires policy_logits to be properly passed as an array
-    flat_logits = masked_logits.reshape(num_boards, -1)
-    policy_probs = jax.nn.softmax(flat_logits, axis=1)
-    
-    # Sample from categorical distribution
-    rng, subkey = jax.random.split(rng)
-    flat_actions = jax.random.categorical(subkey, policy_probs)
-    
-    # Convert to 2D coordinates
-    rows = flat_actions // board_size
-    cols = flat_actions % board_size
-    actions = jnp.stack([rows, cols], axis=1)
-    
-    return actions, rng
-
-
-def compute_loss(params, apply_fn, batch, is_training=True):
-    """
-    Compute policy and value losses for training.
-    
-    Args:
-        params: Model parameters
-        apply_fn: Model apply function
-        batch: Training batch
-        is_training: Whether in training mode
-        
-    Returns:
-        total_loss: Combined loss
-        metrics: Dictionary of metrics
-    """
-    observations, target_policies, target_values = batch
-    
-    # Forward pass
-    predicted_policies, predicted_values = apply_fn(params, observations)
-    
-    # Policy loss (cross-entropy loss)
-    batch_size = observations.shape[0]
-    board_size = observations.shape[1]
-    
-    # Flatten the policy predictions and targets
-    flat_predicted_policies = predicted_policies.reshape(batch_size, -1)
-    flat_target_policies = target_policies
-    
-    policy_loss = optax.softmax_cross_entropy(flat_predicted_policies, flat_target_policies).mean()
-    
-    # Value loss (MSE)
-    value_loss = optax.l2_loss(predicted_values, target_values).mean()
-    
-    # Combine losses
-    total_loss = policy_loss + value_loss
-    
-    # Calculate metrics
-    metrics = {
-        'total_loss': total_loss,
-        'policy_loss': policy_loss,
-        'value_loss': value_loss,
-        'predicted_value_mean': predicted_values.mean(),
-        'target_value_mean': target_values.mean(),
-    }
-    
-    return total_loss, metrics
-
-
-@partial(jax.jit, static_argnums=(3,))
-def train_step(state, batch, rng, is_training=True):
-    """Single training step."""
-    grad_fn = jax.value_and_grad(compute_loss, has_aux=True)
-    (loss, metrics), grads = grad_fn(state.params, state.apply_fn, batch, is_training)
-    
-    # Update parameters
-    new_state = state.apply_gradients(grads=grads)
-    
-    return new_state, metrics, loss
-
-
-@partial(jax.jit, static_argnums=(0, 1, 2))
-def run_self_play_episode(board_size, num_boards, num_games, state, rng, temperature_schedule):
-    """
-    Run a batch of self-play episodes using the current model.
-    
-    Args:
-        board_size: Board size
-        num_boards: Number of parallel boards
-        num_games: Number of games to play
-        state: Training state with model parameters
-        rng: JAX random key
-        temperature_schedule: Function mapping step to temperature
-        
-    Returns:
-        trajectories: List of game trajectories
-        final_rewards: Final rewards for each game
-        new_rng: Updated random key
-    """
-    # Initialize environment
-    rng, env_rng = jax.random.split(rng)
-    env_state = init_env(env_rng, board_size, num_boards)
-    env_state, observations = reset_env(env_state)
-    
-    # Initialize rewards
-    total_rewards = jnp.zeros((num_boards,))
-    step_count = 0
-    
-    # Game loop
-    def game_loop_cond(state_tuple):
-        _, env_state, _, step_count, _ = state_tuple
-        # Continue until all games are done or we reach max steps
-        return (~jnp.all(env_state['dones'])) & (step_count < board_size * board_size)
-    
-    def game_loop_body(state_tuple):
-        rng, env_state, total_rewards, step_count, game_history = state_tuple
-        
-        # Get current temperature based on step count
-        temperature = temperature_schedule(step_count)
-        
-        # Get observations from current board state
-        obs = get_observations(env_state['board'], env_state['current_player'])
-        
-        # Get policy and value from model
-        rng, inference_rng = jax.random.split(rng)
-        policy_logits, values = state.apply_fn(state.params, obs)
-        
-        # Ensure policy_logits is a valid array before passing to sample_action_from_policy
-        if isinstance(policy_logits, tuple):
-            # If it's a tuple (shouldn't happen with the right model), take first element
-            policy_logits = policy_logits[0]
-        
-        # Sample action from policy
-        actions, rng = sample_action_from_policy(env_state, policy_logits, inference_rng, temperature)
-        
-        # Store policy probabilities (flattened)
-        # Again ensure it's a valid array before reshaping
-        if isinstance(policy_logits, tuple):
-            flat_logits = policy_logits[0].reshape(num_boards, -1)
-        else:
-            flat_logits = policy_logits.reshape(num_boards, -1)
-            
-        policy_probs = jax.nn.softmax(flat_logits, axis=1)
-        
-        # Take environment step
-        next_env_state, next_obs, rewards, dones = step_env(env_state, actions)
-        
-        # Update histories
-        game_history['boards'].append(env_state['board'])
-        game_history['actions'].append(actions)
-        game_history['policies'].append(policy_probs)
-        game_history['rewards'].append(rewards)
-        game_history['players'].append(env_state['current_player'])
-        
-        # Update total rewards
-        next_total_rewards = total_rewards + rewards
-        
-        return rng, next_env_state, next_total_rewards, step_count + 1, game_history
-    
-    # Initialize game history
-    game_history = {
-        'boards': [env_state['board']],
-        'actions': [],
-        'policies': [],
-        'rewards': [],
-        'players': [env_state['current_player']],
-    }
-    
-    # Run game loop
-    rng, final_env_state, final_rewards, final_step_count, final_history = jax.lax.while_loop(
-        game_loop_cond,
-        game_loop_body,
-        (rng, env_state, total_rewards, step_count, game_history)
-    )
-    
-    return final_history, final_rewards, rng
-
-
-def process_game_history(game_history, final_rewards, discount=0.99):
-    """
-    Process game history to create training examples.
-    
-    Args:
-        game_history: Dictionary of game history
-        final_rewards: Final rewards for each game
-        discount: Reward discount factor
-        
-    Returns:
-        observations: Input observations
-        target_policies: Target policy distributions
-        target_values: Target value predictions
-    """
-    # Extract history components
-    boards = game_history['boards']
-    actions = game_history['actions']
-    policies = game_history['policies']
-    rewards = game_history['rewards']
-    players = game_history['players']
-    
-    # Number of steps and boards
-    num_steps = len(actions)
-    num_boards = boards[0].shape[0]
-    board_size = boards[0].shape[1]
-    
-    # Initialize storage for training examples
-    all_observations = []
-    all_target_policies = []
-    all_target_values = []
-    
-    # Calculate returns and create training examples for each step
-    for t in range(num_steps):
-        # Get observations at time t
-        board_t = boards[t]
-        player_t = players[t]
-        
-        # Normalize from perspective of current player
-        player_reshaped = player_t[:, jnp.newaxis, jnp.newaxis]
-        obs = board_t * player_reshaped
-        
-        # Get target policy (actual action taken)
-        action_t = actions[t]
-        policy_targets = jnp.zeros((num_boards, board_size * board_size))
-        indices = jnp.arange(num_boards)
-        flat_actions = action_t[:, 0] * board_size + action_t[:, 1]
-        policy_targets = policy_targets.at[indices, flat_actions].set(1.0)
-        
-        # Calculate bootstrap returns
-        # For terminal states, use the final reward
-        # For non-terminal states, use TD(0) bootstrap
-        if t == num_steps - 1:
-            # Final step - use actual returns
-            returns = final_rewards
-        else:
-            # Intermediate step - could bootstrap from values, but using actual returns for now
-            returns = final_rewards
-        
-        # Flip returns for player perspective
-        returns = returns * player_t
-        
-        # Store training examples
-        all_observations.append(obs)
-        all_target_policies.append(policy_targets)
-        all_target_values.append(returns)
-    
-    # Stack all examples
-    stacked_observations = jnp.concatenate(all_observations, axis=0)
-    stacked_policies = jnp.concatenate(all_target_policies, axis=0)
-    stacked_values = jnp.concatenate(all_target_values, axis=0)
-    
-    return stacked_observations, stacked_policies, stacked_values
-
-
-def evaluate_against_random(state, model, board_size=15, num_eval_games=128, seed=42):
-    """
-    Evaluate current model against random player.
-    
-    Args:
-        state: Training state with model parameters
-        model: ActorCritic model instance
-        board_size: Size of the board
-        num_eval_games: Number of evaluation games
-        seed: Random seed
-        
-    Returns:
-        win_rate: Win rate against random player
-    """
-    # Initialize environment
-    rng = jax.random.PRNGKey(seed)
-    env_state = init_env(rng, board_size, num_eval_games)
-    env_state, observations = reset_env(env_state)
-    
-    total_rewards = jnp.zeros((num_eval_games,))
-    
-    # Game loop
-    while not jnp.all(env_state['dones']):
-        # Current player's turn
-        current_player = env_state['current_player']
-        
-        # If black's turn (1), use model; if white's turn (-1), use random
-        is_model_turn = current_player == 1
-        
-        # Get observations from current board state when it's model's turn
-        obs = get_observations(env_state['board'], current_player)
-        
-        # For model's turn, get policy from model
-        policy_logits, _ = state.apply_fn(state.params, obs)
-        
-        # For random's turn, generate random policy
-        rng, action_rng = jax.random.split(rng)
-        
-        # Combine: model policy for black, random for white
-        if jnp.all(is_model_turn):
-            actions, rng = sample_action_from_policy(env_state, policy_logits, action_rng, temperature=0.1)
-            env_state_updated = env_state
-        else:
-            actions, env_state_updated = sample_action(env_state, env_state['rng'])
-            
-        # Update RNG in environment state
-        env_state = env_state_updated
-        
-        # Take environment step
-        env_state, obs, rewards, dones = step_env(env_state, actions)
-        
-        # Update rewards
-        total_rewards = total_rewards + rewards
-    
-    # Calculate win rate (when model as black player (1) wins)
-    black_wins = (env_state['winners'] == 1)
-    win_rate = jnp.mean(black_wins)
-    
-    return win_rate
-
-
-def main(config):
-    print("Starting Gomoku training with the following parameters:")
-    for key, value in config.items():
-        print(f"{key}: {value}")
-    
-    # Create checkpoint directory if it doesn't exist
-    os.makedirs(config["checkpoint_dir"], exist_ok=True)
-    
-    # Initialize random key
     rng = jax.random.PRNGKey(config["seed"])
-    
-    # Create ActorCritic model and optimizer
-    rng, init_rng = jax.random.split(rng)
-    model = ActorCritic(board_size=config["board_size"], channels=config["num_channels"])
-    
-    state = create_train_state(
-        init_rng, model, config["learning_rate"], config["board_size"]
+    rng, init_key, black_key, white_key = jax.random.split(rng, 4)
+
+    # Create separate models for black and white players
+    black_actor_critic = ActorCritic(board_size=board_size)
+    white_actor_critic = ActorCritic(board_size=board_size)
+
+    # Initialize models with dummy input
+    dummy_input = jnp.ones((1, board_size, board_size), dtype=jnp.float32)
+    black_params = black_actor_critic.init(black_key, dummy_input)
+    white_params = white_actor_critic.init(white_key, dummy_input)
+
+    # Create optimizers for both models
+    black_optimizer = optax.chain(
+        optax.clip_by_global_norm(grad_clip_norm),
+        optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay),
     )
+    black_opt_state = black_optimizer.init(black_params)
+
+    white_optimizer = optax.chain(
+        optax.clip_by_global_norm(grad_clip_norm),
+        optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay),
+    )
+    white_opt_state = white_optimizer.init(white_params)
+
+    # Load different checkpoints for black and white models if available
+    loaded_black_params, loaded_black_opt_state, loaded_white_params, loaded_white_opt_state = select_training_checkpoints(checkpoint_dir, init_key)
     
-    # Temperature schedule for self-play (start high, anneal down)
-    def temperature_schedule(step):
-        max_steps = config["board_size"] * config["board_size"]
-        temp = 1.0 - 0.9 * min(1.0, step / (max_steps * 0.5))
-        return jnp.maximum(0.1, temp)
+    # Update black model if checkpoint was loaded
+    if loaded_black_params is not None:
+        black_params = loaded_black_params
+        black_opt_state = loaded_black_opt_state
     
-    # Training loop
-    best_eval_win_rate = 0.0
+    # Update white model if checkpoint was loaded
+    if loaded_white_params is not None:
+        white_params = loaded_white_params
+        white_opt_state = loaded_white_opt_state
     
-    for iteration in range(config["total_iterations"]):
-        start_time = time.time()
+    # Log training initialization
+    if loaded_black_params is not None or loaded_white_params is not None:
+        logging.info("Loaded existing model parameters from checkpoints.")
+    else:
+        logging.info("Starting training from scratch with new models.")
+
+    env = init_env(rng, board_size, num_boards)
+
+    return (
+        env,
+        black_actor_critic,
+        black_params,
+        black_opt_state,
+        black_optimizer,
+        white_actor_critic,
+        white_params,
+        white_opt_state,
+        white_optimizer,
+        checkpoint_dir,
+        rng,
+        board_size,
+    )
+
+
+@jit
+def discount_rewards(rewards, gamma):
+    """
+    Calculate discounted rewards for batched trajectories.
+
+    Args:
+      rewards: a 2D jnp.array with shape (T, batch)
+      gamma: discount factor.
+
+    Returns:
+      A jnp.array of discounted rewards with the same shape as `rewards`.
+    """
+
+    def discount_single(r):
+        def scan_fn(carry, reward):
+            new_carry = reward + gamma * carry
+            return new_carry, new_carry
+
+        _, discounted_reversed = lax.scan(scan_fn, 0.0, r[::-1])
+
+        return discounted_reversed[::-1]
+
+    discounted = jax.vmap(discount_single, in_axes=1, out_axes=1)(rewards)
+    
+    T = rewards.shape[0]
+    alternating_signs = jnp.power(-1.0, jnp.arange(T) % 2)
+    
+    return discounted * alternating_signs[:, None]
+
+
+def run_episode(env_state, black_actor_critic, black_params, white_actor_critic, white_params, gamma, rng):
+    """
+    Runs one episode using separate models for black and white players,
+    with pre-allocated arrays and masking for handling variable-length trajectories.
+    Uses lax.while_loop for JIT compatibility.
+
+    Args:
+      env_state: Dictionary containing the environment state.
+      black_actor_critic: ActorCritic model for black player (first player).
+      black_params: Parameters for black player model.
+      white_actor_critic: ActorCritic model for white player (second player).
+      white_params: Parameters for white player model.
+      gamma: discount factor.
+      rng: JAX RNG key.
+
+    Returns:
+      black_trajectory: dict with keys ("obs", "actions", "rewards", "masks") for black player
+      white_trajectory: dict with keys ("obs", "actions", "rewards", "masks") for white player
+      rng: updated RNG key.
+    """
+    env_state, obs = reset_env(env_state)
+
+    board_size = env_state["board_size"]
+
+    max_steps = board_size * board_size
+    num_envs = env_state["num_boards"]
+
+    observations = jnp.zeros(
+        (max_steps, num_envs, board_size, board_size), dtype=jnp.float32
+    )
+    actions = jnp.zeros((max_steps, num_envs, 2), dtype=jnp.int32)
+    rewards = jnp.zeros((max_steps, num_envs), dtype=jnp.float32)
+    masks = jnp.zeros((max_steps, num_envs), dtype=jnp.bool_)
+
+    loop_state = {
+        "env_state": env_state,
+        "obs": obs,
+        "observations": observations,
+        "actions": actions,
+        "rewards": rewards,
+        "masks": masks,
+        "step_idx": 0,
+        "rng": rng,
+    }
+
+    @jit
+    def cond_fn(state):
+        return ~jnp.all(state["env_state"]["dones"])
+
+    # Define separate functions for black and white players to avoid using lax.cond on Python objects
+    @partial(jit, static_argnames=["actor_critic"])
+    def black_turn_fn(state, actor_critic, params):
+        policy_logits, value = actor_critic.apply(params, state["obs"])
+        action_mask = get_action_mask(state["env_state"])
+        logits = jnp.where(action_mask, policy_logits, -jnp.inf)
+
+        rng, subkey = jax.random.split(state["rng"])
+        action = actor_critic.sample_action(logits, subkey)
+
+        step_idx = state["step_idx"]
+        active_mask = ~state["env_state"]["dones"]
+        observations = state["observations"].at[step_idx].set(state["obs"])
+        actions = state["actions"].at[step_idx].set(action)
+        masks = state["masks"].at[step_idx].set(active_mask)
+
+        next_env_state, obs, step_rewards, dones = step_env(state["env_state"], action)
+        rewards = state["rewards"].at[step_idx].set(step_rewards)
+
+        return {
+            "env_state": next_env_state,
+            "obs": obs,
+            "observations": observations,
+            "actions": actions,
+            "rewards": rewards,
+            "masks": masks,
+            "step_idx": step_idx + 1,
+            "rng": rng,
+        }
+    
+    @partial(jit, static_argnames=["actor_critic"])
+    def white_turn_fn(state, actor_critic, params):
+        policy_logits, value = actor_critic.apply(params, state["obs"])
+        action_mask = get_action_mask(state["env_state"])
+        logits = jnp.where(action_mask, policy_logits, -jnp.inf)
+
+        rng, subkey = jax.random.split(state["rng"])
+        action = actor_critic.sample_action(logits, subkey)
+
+        step_idx = state["step_idx"]
+        active_mask = ~state["env_state"]["dones"]
+        observations = state["observations"].at[step_idx].set(state["obs"])
+        actions = state["actions"].at[step_idx].set(action)
+        masks = state["masks"].at[step_idx].set(active_mask)
+
+        next_env_state, obs, step_rewards, dones = step_env(state["env_state"], action)
+        rewards = state["rewards"].at[step_idx].set(step_rewards)
+
+        return {
+            "env_state": next_env_state,
+            "obs": obs,
+            "observations": observations,
+            "actions": actions,
+            "rewards": rewards,
+            "masks": masks,
+            "step_idx": step_idx + 1,
+            "rng": rng,
+        }
+
+    @partial(jit, static_argnames=["black_actor_critic", "white_actor_critic"])
+    def body_fn(state, black_actor_critic, black_params, white_actor_critic, white_params):
+        # Determine which player's turn it is (black: even steps starting at 0, white: odd steps)
+        current_step = state["step_idx"]
+        is_black_turn = (current_step % 2 == 0)
         
-        # Self-play phase
-        print(f"Iteration {iteration+1}/{config['total_iterations']} - Starting self-play...")
-        rng, self_play_rng = jax.random.split(rng)
-        
-        game_history, final_rewards, rng = run_self_play_episode(
-            config["board_size"],
-            config["batch_size"],
-            config["self_play_games"],
-            state,
-            self_play_rng,
-            temperature_schedule
+        # Use JAX's where for pure values selection, not for Python objects
+        return jax.lax.cond(
+            is_black_turn,
+            lambda s: black_turn_fn(s, black_actor_critic, black_params),
+            lambda s: white_turn_fn(s, white_actor_critic, white_params),
+            state
+        )
+
+    # Create a wrapper for body_fn that includes both actor-critic models and their params
+    def body_fn_wrapped(state):
+        return body_fn(state, black_actor_critic, black_params, white_actor_critic, white_params)
+
+    final_state = lax.while_loop(cond_fn, body_fn_wrapped, loop_state)
+
+    env_state = final_state["env_state"]
+    step_idx = final_state["step_idx"]
+    observations = final_state["observations"]
+    actions = final_state["actions"]
+    rewards = final_state["rewards"]
+    masks = final_state["masks"]
+    rng = final_state["rng"]
+
+    actual_steps = step_idx
+
+    obs_truncated = observations[:actual_steps]
+    actions_truncated = actions[:actual_steps]
+    rewards_truncated = rewards[:actual_steps]
+    masks_truncated = masks[:actual_steps]
+
+    discounted_rewards = discount_rewards(rewards_truncated, gamma)
+
+    winners = env_state["winners"]
+    discounted_rewards = discounted_rewards * winners[None, :]
+
+    # Split trajectories for black (even indices) and white (odd indices) players
+    black_trajectory = {
+        "obs": obs_truncated[::2],
+        "actions": actions_truncated[::2],
+        "rewards": discounted_rewards[::2],
+        "masks": masks_truncated[::2],
+        "episode_length": (actual_steps + 1) // 2  # Ceiling division for odd lengths
+    }
+    
+    white_trajectory = {
+        "obs": obs_truncated[1::2],
+        "actions": actions_truncated[1::2],
+        "rewards": discounted_rewards[1::2],
+        "masks": masks_truncated[1::2],
+        "episode_length": actual_steps // 2  # Floor division
+    }
+
+    return black_trajectory, white_trajectory, rng
+
+
+@partial(jax.jit, static_argnums=(3, 4))
+def train_step(params, opt_state, trajectory, actor_critic, optimizer):
+    """
+    Perform one training update with masked loss computation.
+
+    Args:
+      params: network parameters.
+      opt_state: optimizer state.
+      trajectory: collected trajectory with masks.
+      actor_critic: network instance.
+      optimizer: optax optimizer.
+
+    Returns:
+      (updated_params, updated_opt_state, loss, aux, grad_norm)
+    """
+    masks = trajectory["masks"]
+
+    returns = trajectory["rewards"]
+
+    returns_mean = jnp.mean(returns, where=masks)
+    returns_std = jnp.std(returns, where=masks) + 1e-8
+
+    normalized_returns = (returns - returns_mean) / returns_std
+
+    def loss_fn(params):
+        obs = trajectory["obs"]
+        actions = trajectory["actions"]
+
+        board_size = obs.shape[2]  # obs shape is (T, B, board_size, board_size)
+
+        T, B = obs.shape[0], obs.shape[1]
+
+        obs_flat = obs.reshape(-1, board_size, board_size)
+        actions_flat = actions.reshape(-1, 2)
+        flat_actions = actions_flat[:, 0] * board_size + actions_flat[:, 1]
+        masks_flat = masks.reshape(-1)
+        returns_flat = normalized_returns.reshape(-1)
+
+        logits, values = actor_critic.apply(params, obs_flat)
+        values = values.reshape(-1)
+
+        logits_flat = logits.reshape(-1, board_size * board_size)
+        log_probs = jax.nn.log_softmax(logits_flat, axis=-1)
+
+        batch_indices = jnp.arange(T * B)
+        chosen_log_probs = log_probs[batch_indices, flat_actions]
+
+        probs = jax.nn.softmax(logits_flat, axis=-1)
+        entropy = -jnp.sum(probs * log_probs, axis=-1)
+
+        advantages = returns_flat - values
+
+        masked_actor_loss = (
+            -chosen_log_probs * lax.stop_gradient(advantages) * masks_flat
+        )
+        masked_critic_loss = jnp.square(returns_flat - values) * masks_flat
+        masked_entropy = entropy * masks_flat
+
+        valid_steps_sum = jnp.sum(masks_flat)
+        actor_loss = jnp.sum(masked_actor_loss) / valid_steps_sum
+        critic_loss = jnp.sum(masked_critic_loss) / valid_steps_sum
+        entropy_loss = -jnp.sum(masked_entropy) / valid_steps_sum
+
+        total_loss = actor_loss + 0.5 * critic_loss + 0.01 * entropy_loss
+        return total_loss, (actor_loss, critic_loss, entropy_loss)
+
+    (loss, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
+    grads = jax.tree_util.tree_map(
+        lambda g, p: jnp.zeros_like(p) if g is None else g, grads, params
+    )
+    grad_norm = optax.global_norm(grads)
+    updates, opt_state = optimizer.update(grads, opt_state, params)
+    params = optax.apply_updates(params, updates)
+    return params, opt_state, loss, aux, grad_norm
+
+
+def main():
+    """
+    Main training loop using separate models for black and white players
+    with self-play against randomly selected previous model versions.
+    """
+    config = load_config()
+
+    (
+        env,
+        black_actor_critic,
+        black_params,
+        black_opt_state,
+        black_optimizer,
+        white_actor_critic,
+        white_params,
+        white_opt_state,
+        white_optimizer,
+        checkpoint_dir,
+        rng,
+        board_size,
+    ) = init_train(config)
+
+    logging.info("Starting training loop.")
+
+    num_episodes = config["total_iterations"]
+    checkpoint_interval = config["save_frequency"]
+    gamma = config["discount"]
+    max_checkpoints = config["max_checkpoints"]
+
+    # Initialize opponent parameters at the beginning
+    black_opponent_params = black_params
+    white_opponent_params = white_params
+    
+    for episode in range(1, num_episodes + 1):
+        # Run episode with the selected models
+        black_traj, white_traj, rng = run_episode(
+            env, 
+            black_actor_critic, 
+            black_opponent_params,  # Using opponent model for gameplay
+            white_actor_critic, 
+            white_opponent_params,  # Using opponent model for gameplay
+            gamma, 
+            rng
         )
         
-        # Process game history to create training examples
-        observations, target_policies, target_values = process_game_history(
-            game_history, final_rewards, discount=config["discount"]
+        # Train black model on black's moves
+        black_params, black_opt_state, black_loss, black_aux, black_grad_norm = train_step(
+            black_params, black_opt_state, black_traj, black_actor_critic, black_optimizer
         )
         
-        # Learning phase
-        print(f"Iteration {iteration+1}/{config['total_iterations']} - Starting learning...")
-        
-        # Shuffle and create batches
-        num_examples = observations.shape[0]
-        indices = jnp.arange(num_examples)
-        rng, shuffle_rng = jax.random.split(rng)
-        shuffled_indices = jax.random.permutation(shuffle_rng, indices)
-        
-        # Training loop
-        for epoch in range(config["epochs_per_iteration"]):
-            epoch_metrics = []
+        # Train white model on white's moves
+        white_params, white_opt_state, white_loss, white_aux, white_grad_norm = train_step(
+            white_params, white_opt_state, white_traj, white_actor_critic, white_optimizer
+        )
+
+        # Log training metrics for both models
+        logging.info(
+            f"Episode {episode}: "
+            f"Black - Loss {black_loss:.4f} (Actor Loss {black_aux[0]:.4f}, "
+            f"Critic Loss {black_aux[1]:.4f}, Entropy Loss {black_aux[2]:.4f}) | "
+            f"Grad Norm {black_grad_norm:.4f} | "
+            f"White - Loss {white_loss:.4f} (Actor Loss {white_aux[0]:.4f}, "
+            f"Critic Loss {white_aux[1]:.4f}, Entropy Loss {white_aux[2]:.4f}) | "
+            f"Grad Norm {white_grad_norm:.4f}"
+        )
+
+        # Save checkpoints at defined intervals
+        if episode % checkpoint_interval == 0:
+            # First save the current models
+            save_checkpoint(black_params, black_opt_state, checkpoint_dir)
+            save_checkpoint(white_params, white_opt_state, checkpoint_dir)
+            logging.info(f"Saved both black and white models as checkpoints at episode {episode}")
             
-            for i in range(0, num_examples, config["batch_size"]):
-                batch_indices = shuffled_indices[i:i+config["batch_size"]]
-                batch = (
-                    observations[batch_indices],
-                    target_policies[batch_indices],
-                    target_values[batch_indices]
-                )
-                
-                # Training step
-                rng, train_rng = jax.random.split(rng)
-                state, metrics, loss = train_step(state, batch, train_rng)
-                epoch_metrics.append(metrics)
+            # THEN select new opponent models for the next round of training
+            rng, black_key, white_key, select_key = jax.random.split(rng, 4)
             
-            # Log epoch results
-            avg_metrics = {k: jnp.mean(jnp.array([m[k] for m in epoch_metrics])) for k in epoch_metrics[0]}
-            print(f"Epoch {epoch+1}/{config['epochs_per_iteration']}, Loss: {avg_metrics['total_loss']:.4f}, "
-                  f"Policy Loss: {avg_metrics['policy_loss']:.4f}, Value Loss: {avg_metrics['value_loss']:.4f}")
-        
-        # Evaluation phase
-        if (iteration + 1) % config["eval_frequency"] == 0:
-            print(f"Iteration {iteration+1}/{config['total_iterations']} - Evaluating...")
-            eval_win_rate = evaluate_against_random(
-                state, model, board_size=config["board_size"], num_eval_games=config["eval_games"]
-            )
-            print(f"Evaluation win rate against random: {eval_win_rate:.2%}")
+            # Load potential opponent models from checkpoints
+            loaded_black_params, loaded_black_opt_state, loaded_white_params, loaded_white_opt_state = select_training_checkpoints(checkpoint_dir, select_key)
             
-            # Save checkpoint if improved
-            if eval_win_rate > best_eval_win_rate:
-                best_eval_win_rate = eval_win_rate
-                checkpoint_path = os.path.join(config["checkpoint_dir"], f"best_model")
-                checkpoints.save_checkpoint(checkpoint_path, state, step=iteration, overwrite=True)
-                print(f"Saved new best model with win rate {best_eval_win_rate:.2%}")
-        
-        # Always save latest model
-        if (iteration + 1) % config["save_frequency"] == 0:
-            checkpoint_path = os.path.join(config["checkpoint_dir"], f"model_{iteration+1}")
-            checkpoints.save_checkpoint(checkpoint_path, state, step=iteration, overwrite=True)
-            print(f"Saved model at iteration {iteration+1}")
-        
-        iteration_time = time.time() - start_time
-        print(f"Iteration {iteration+1} completed in {iteration_time:.2f} seconds.")
+            # With 50% probability, use the current model, otherwise use loaded checkpoint
+            if loaded_black_params is not None and jax.random.uniform(black_key) < 0.5:
+                black_opponent_params = loaded_black_params
+                black_opponent_opt_state = loaded_black_opt_state
+                logging.info("Using loaded checkpoint as black opponent")
+            else:
+                black_opponent_params = black_params
+                black_opponent_opt_state = black_opt_state
+                logging.info("Using current black model as black opponent")
+            
+            if loaded_white_params is not None and jax.random.uniform(white_key) < 0.5:
+                white_opponent_params = loaded_white_params
+                white_opponent_opt_state = loaded_white_opt_state
+                logging.info("Using loaded checkpoint as white opponent")
+            else:
+                white_opponent_params = white_params
+                white_opponent_opt_state = white_opt_state
+                logging.info("Using current white model as white opponent")
+            
+            logging.info(f"Selected opponent models for next training round after episode {episode}")
+
+    logging.info("Training complete. Saving final model parameters.")
+    # Save both final models
+    save_checkpoint(black_params, black_opt_state, checkpoint_dir)
+    save_checkpoint(white_params, white_opt_state, checkpoint_dir)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train Gomoku AlphaZero-style model")
-    parser.add_argument("--config", type=str, default=None, help="Path to YAML configuration file")
-    args = parser.parse_args()
-    
-    # Load configuration
-    config = load_config(args.config)
-    
-    # Run training
-    main(config)
+    main()
