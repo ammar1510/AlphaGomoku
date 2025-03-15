@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from jax import jit, lax
+import numpy as np
 
 from env.functional_gomoku import get_action_mask, init_env, reset_env, step_env
 from models.actor_critic import ActorCritic
@@ -19,13 +20,14 @@ from utils.config import (
     save_checkpoint,
     select_training_checkpoints,
 )
+from utils.logging_utils import setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-
+# We'll replace this with our new logging setup in the main function
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format="%(asctime)s [%(levelname)s] %(message)s",
+#     datefmt="%Y-%m-%d %H:%M:%S",
+# )
 
 
 def init_train(config):
@@ -65,13 +67,11 @@ def init_train(config):
         optax.clip_by_global_norm(grad_clip_norm),
         optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay),
     )
-    black_opt_state = black_optimizer.init(black_params)
-
+    
     white_optimizer = optax.chain(
         optax.clip_by_global_norm(grad_clip_norm),
         optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay),
     )
-    white_opt_state = white_optimizer.init(white_params)
 
     # Load different checkpoints for black and white models if available
     loaded_black_params, loaded_black_opt_state, loaded_white_params, loaded_white_opt_state = select_training_checkpoints(checkpoint_dir, init_key)
@@ -79,18 +79,23 @@ def init_train(config):
     # Update black model if checkpoint was loaded
     if loaded_black_params is not None:
         black_params = loaded_black_params
-        black_opt_state = loaded_black_opt_state
+        # Note: We're not using loaded_black_opt_state anymore
     
     # Update white model if checkpoint was loaded
     if loaded_white_params is not None:
         white_params = loaded_white_params
-        white_opt_state = loaded_white_opt_state
+        # Note: We're not using loaded_white_opt_state anymore
     
     # Log training initialization
     if loaded_black_params is not None or loaded_white_params is not None:
         logging.info("Loaded existing model parameters from checkpoints.")
     else:
         logging.info("Starting training from scratch with new models.")
+        
+    # Initialize optimizer states AFTER loading parameters
+    # This ensures optimizer states are always compatible with current parameters
+    black_opt_state = black_optimizer.init(black_params)
+    white_opt_state = white_optimizer.init(white_params)
 
     env = init_env(rng, board_size, num_boards)
 
@@ -284,9 +289,8 @@ def run_episode(env_state, black_actor_critic, black_params, white_actor_critic,
     masks_truncated = masks[:actual_steps]
 
     discounted_rewards = discount_rewards(rewards_truncated, gamma)
+    logging.info("discounted_rewards: \n%s", np.array(discounted_rewards).tolist())
 
-    winners = env_state["winners"]
-    discounted_rewards = discounted_rewards * winners[None, :]
 
     # Split trajectories for black (even indices) and white (odd indices) players
     black_trajectory = {
@@ -389,7 +393,26 @@ def main():
     Main training loop using separate models for black and white players
     with self-play against randomly selected previous model versions.
     """
-    config = load_config()
+    # Set up logging to both console and file
+    board_size = None
+    try:
+        # First, we need to get the board size to use in the log filename
+        config = load_config()
+        board_size = config["board_size"]
+    except Exception:
+        # If we can't load the config yet, use a generic name
+        pass
+    
+    # Set up logging with an appropriate name
+    log_filename = f"gomoku_training_{board_size}x{board_size}.log" if board_size else None
+    setup_logging(log_dir="logs", filename=log_filename)
+    
+    logging.info("Starting AlphaGomoku training...")
+    logging.info(f"JAX devices: {jax.devices()}")
+    
+    # Now load the config again if needed (it will be logged now)
+    if not board_size:
+        config = load_config()
 
     (
         env,
@@ -441,7 +464,7 @@ def main():
 
         # Log training metrics for both models
         logging.info(
-            f"Episode {episode}: "
+            f"Episode {episode}/{num_episodes}: "
             f"Black - Loss {black_loss:.4f} (Actor Loss {black_aux[0]:.4f}, "
             f"Critic Loss {black_aux[1]:.4f}, Entropy Loss {black_aux[2]:.4f}) | "
             f"Grad Norm {black_grad_norm:.4f} | "
@@ -482,7 +505,7 @@ def main():
                 white_opponent_opt_state = white_opt_state
                 logging.info("Using current white model as white opponent")
             
-            logging.info(f"Selected opponent models for next training round after episode {episode}")
+            logging.info(f"Selected models for next training round after episode {episode}")
 
     logging.info("Training complete. Saving final model parameters.")
     # Save both final models

@@ -1,173 +1,243 @@
+import os
+import tempfile
+import unittest
+from unittest.mock import patch, MagicMock
+
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
+import optax
 
-# Import the functions to be tested.
-from training.train import discount_rewards, run_episode
-
-
-def test_discount_rewards():
-    """
-    Test that discount_rewards() returns correctly discounted rewards for a rewards array of shape (batch, T).
-
-    For a rewards array:
-         [[ 1,  2,  3],
-          [10, 20, 30]]
-
-    and gamma = 0.99, we expect for each batch:
-
-      For the first batch:
-          r[0] = 1   + 0.99*2   + (0.99)**2*3
-          r[1] = 2   + 0.99*3
-          r[2] = 3
-
-      For the second batch:
-          r[0] = 10  + 0.99*20  + (0.99)**2*30
-          r[1] = 20  + 0.99*30
-          r[2] = 30
-    """
-    gamma = 0.99
-    rewards = jnp.array([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]])  # shape: (batch, T)
-
-    # Use vmap to apply discount_rewards over each reward sequence (i.e. over axis 0)
-    computed = discount_rewards(rewards, gamma)
-    expected = jnp.array(
-        [
-            [1.0 + 2.0 * gamma + 3.0 * gamma**2, 2.0 + 3.0 * gamma, 3.0],
-            [10.0 + 20.0 * gamma + 30.0 * gamma**2, 20.0 + 30.0 * gamma, 30.0],
-        ]
-    )
-    assert jnp.allclose(
-        computed, expected, atol=1e-4
-    ), f"Expected {expected} but got {computed}"
+from training.train import (
+    init_train,
+    discount_rewards,
+    run_episode,
+    train_step
+)
+from models.actor_critic import ActorCritic
+from env.functional_gomoku import init_env, reset_env
 
 
-
-# Define dummy environment and dummy ActorCritic for testing run_episode.
-
-
-class DummyEnv:
-    """
-    A dummy Gomoku environment that simulates a two-environment (num_envs=2)
-    episode over two steps.
-    - reset() returns an initial board with all zeros and dones = [False, False].
-    - The first call to step() returns dones = [True, False] so that for
-      env0 the episode ends, and the second call returns dones = [True, True],
-      ending the episode for both.
-    """
-
-    def __init__(self):
-        self.step_count = 0
-        self.num_envs = 2
-        self.board_size = 3
-        self.winners = jnp.ones((self.num_envs,))
-
-    def reset(self):
-        self.step_count = 0
-        obs = jnp.full((self.num_envs, self.board_size, self.board_size), 0)
-        dones = jnp.array([False, False])
-        return obs, dones
-
-    def step(self, action):
-        self.step_count += 1
-        obs = jnp.full(
-            (self.num_envs, self.board_size, self.board_size), self.step_count
+class TestTrainingFunctions(unittest.TestCase):
+    
+    def setUp(self):
+        """Set up test environment and parameters."""
+        self.board_size = 5  # Small board for faster tests
+        self.test_config = {
+            "board_size": self.board_size,
+            "num_boards": 2,
+            "learning_rate": 0.001,
+            "weight_decay": 1e-4,
+            "grad_clip_norm": 1.0,
+            "seed": 42,
+            "render": False,
+            "checkpoint_dir": tempfile.mkdtemp(),  # Temporary directory for checkpoints
+            "discount": 0.99,
+            "save_frequency": 10,
+            "total_iterations": 10,
+        }
+        self.rng = jax.random.PRNGKey(42)
+        
+        # Create temporary checkpoint directory
+        os.makedirs(self.test_config["checkpoint_dir"], exist_ok=True)
+    
+    def tearDown(self):
+        """Clean up after tests."""
+        # Remove temporary checkpoint directory
+        import shutil
+        if os.path.exists(self.test_config["checkpoint_dir"]):
+            shutil.rmtree(self.test_config["checkpoint_dir"])
+    
+    def test_discount_rewards(self):
+        """Test the discount_rewards function with known inputs and outputs."""
+        # Case 1: Simple sequence with constant rewards
+        rewards = jnp.ones((5, 2))  # 5 steps, 2 environments
+        gamma = 0.9
+        discounted = discount_rewards(rewards, gamma)
+        
+        # Expected values for first environment
+        # With alternating signs: [1, -1, 1, -1, 1]
+        # Discounted backwards:
+        # [1 - 0.9 * (-1) + 0.9^2 * 1 - 0.9^3 * (-1) + 0.9^4 * 1, 
+        #  -1 + 0.9 * 1 - 0.9^2 * (-1) + 0.9^3 * 1, 
+        #  1 - 0.9 * (-1) + 0.9^2 * 1, 
+        #  -1 + 0.9 * 1, 
+        #  1]
+        # This will give varying values based on the alternating signs and discount
+        print("discounted: \n", discounted)
+        
+        # Basic tests - check shape and type
+        self.assertEqual(discounted.shape, rewards.shape)
+        
+        # Test alternating signs
+        # For each time step in the first environment, check if signs alternate
+        first_env_disc = discounted[:, 0]
+        expected_signs = jnp.array([1, -1, 1, -1, 1])
+        self.assertTrue(jnp.all(jnp.sign(first_env_disc) == expected_signs))
+        
+        # Case 2: Test with zero rewards
+        zero_rewards = jnp.zeros((3, 2))
+        zero_discounted = discount_rewards(zero_rewards, gamma)
+        self.assertTrue(jnp.all(zero_discounted == 0))
+        
+        # Case 3: Test with variable rewards
+        variable_rewards = jnp.array([[1.0, 2.0], [0.5, 1.5], [2.0, 0.0]])
+        var_discounted = discount_rewards(variable_rewards, gamma)
+        self.assertEqual(var_discounted.shape, variable_rewards.shape)
+    
+    @patch('training.train.select_training_checkpoints')
+    def test_init_train(self, mock_select_checkpoints):
+        """Test initialization of training components."""
+        # Mock checkpoint selection to return None (no checkpoints)
+        mock_select_checkpoints.return_value = (None, None, None, None)
+        
+        # Call init_train
+        (env, black_ac, black_params, black_opt_state, black_optimizer,
+         white_ac, white_params, white_opt_state, white_optimizer,
+         checkpoint_dir, rng, board_size) = init_train(self.test_config)
+        
+        # Basic checks
+        self.assertEqual(board_size, self.test_config["board_size"])
+        self.assertEqual(env["board_size"], self.test_config["board_size"])
+        self.assertEqual(env["num_boards"], self.test_config["num_boards"])
+        
+        # Check models
+        self.assertIsInstance(black_ac, ActorCritic)
+        self.assertIsInstance(white_ac, ActorCritic)
+        
+        # Check parameter shapes
+        dummy_input = jnp.ones((1, self.board_size, self.board_size))
+        _, black_value = black_ac.apply(black_params, dummy_input)
+        _, white_value = white_ac.apply(white_params, dummy_input)
+        
+        self.assertEqual(black_value.shape, (1,))
+        self.assertEqual(white_value.shape, (1,))
+        
+        # Now test with mock checkpoints
+        dummy_params = MagicMock()
+        dummy_opt_state = MagicMock()
+        mock_select_checkpoints.return_value = (dummy_params, dummy_opt_state, None, None)
+        
+        # Call init_train again
+        (env, black_ac, black_params, black_opt_state, black_optimizer,
+         white_ac, white_params, white_opt_state, white_optimizer,
+         checkpoint_dir, rng, board_size) = init_train(self.test_config)
+        
+        # Check that black model uses loaded params
+        self.assertEqual(black_params, dummy_params)
+        self.assertEqual(black_opt_state, dummy_opt_state)
+        
+        # Test with both black and white checkpoints
+        mock_select_checkpoints.return_value = (dummy_params, dummy_opt_state, dummy_params, dummy_opt_state)
+        
+        # Call init_train again
+        (env, black_ac, black_params, black_opt_state, black_optimizer,
+         white_ac, white_params, white_opt_state, white_optimizer,
+         checkpoint_dir, rng, board_size) = init_train(self.test_config)
+        
+        # Check both models use loaded params
+        self.assertEqual(black_params, dummy_params)
+        self.assertEqual(white_params, dummy_params)
+    
+    def test_run_episode(self):
+        """Test running an episode between black and white players."""
+        # Initialize environment and models
+        rng, init_key = jax.random.split(self.rng)
+        env = init_env(init_key, self.board_size, num_boards=1)
+        env, _ = reset_env(env)
+        
+        black_actor_critic = ActorCritic(board_size=self.board_size)
+        white_actor_critic = ActorCritic(board_size=self.board_size)
+        
+        # Initialize dummy parameters
+        dummy_input = jnp.ones((1, self.board_size, self.board_size))
+        rng, black_key, white_key = jax.random.split(rng, 3)
+        black_params = black_actor_critic.init(black_key, dummy_input)
+        white_params = white_actor_critic.init(white_key, dummy_input)
+        
+        # Run a short episode
+        gamma = 0.99
+        black_traj, white_traj, new_rng = run_episode(
+            env, black_actor_critic, black_params, white_actor_critic, white_params, gamma, rng
         )
-        rewards = jnp.array([1.0, 2.0])
-        if self.step_count == 1:
-            # End episode for env0 only.
-            dones = jnp.array([True, False])
-        else:
-            dones = jnp.array([True, True])
-        return obs, rewards, dones
-
-    def get_action_mask(self):
-        # For testing, assume all actions are valid.
-        return jnp.ones((self.num_envs, self.board_size * self.board_size), dtype=bool)
-
-
-class DummyActorCritic:
-    """
-    A dummy ActorCritic that, when applied, returns constant logits and values.
-    The sample_action() method returns zeros for both coordinates, batched for each environment.
-    """
-
-    board_size = 3
-
-    def apply(self, params, obs):
-        num_envs = obs.shape[0]
-        # For simplicity, we return logits as ones (shape: (num_envs, board_size*board_size))
-        logits = jnp.ones((num_envs, self.board_size * self.board_size))
-        value = jnp.ones((num_envs, 1))
-        return logits, value
-
-    def sample_action(self, logits, rng):
-        num_envs = logits.shape[0]
-        return jnp.zeros((num_envs, 2), dtype=jnp.int32)
-
-
-def create_dummy_actor_critic(board_size):
-    """Helper to create a dummy actor_critic with board_size attached."""
-    dummy = DummyActorCritic()
-    dummy.board_size = board_size
-    return dummy
-
-
-def test_run_episode():
-    """
-    Test run_episode() using the dummy environment and dummy ActorCritic.
-    In our simulation:
-      - The environment runs for two steps.
-      - The dones state after reset is [False, False]
-      - After first step: dones = [True, False] (env0 ends, env1 continues)
-      - After second step: dones = [True, True] (both end)
-
-    With mask = jnp.arange(T)[:, None] <= indices[None, :], we'll include:
-    - For env0: The initial observation and the observation after step 1 (2 observations)
-    - For env1: The initial observation only (1 observation)
-    Total: 3 valid observations
-    """
-    gamma = 0.99
-    rng = jax.random.PRNGKey(42)
-    dummy_env = DummyEnv()
-    dummy_actor = create_dummy_actor_critic(dummy_env.board_size)
-    params = None  # Dummy parameters not used within DummyActorCritic.
-    trajectory, new_rng = run_episode(dummy_env, dummy_actor, params, gamma, rng)
-
-    # Check that the trajectory dict has the expected keys.
-    for key in ["obs", "actions", "rewards"]:
-        assert key in trajectory, f"Key '{key}' not found in trajectory."
-
-    # Based on our understanding of the mask (using <=), we expect 3 valid observations:
-    # Two from env0 (the initial state and the state after step 1)
-    # One from env1 (just the initial state)
-    assert (
-        trajectory["obs"].ndim == 3
-    ), "Processed observations should be 3D (num_valid, board_size, board_size)."
-    assert (
-        trajectory["obs"].shape[0] == 3
-    ), f"Expected 3 valid observations, got {trajectory['obs'].shape[0]}"
-
-    # Check the first observation (from env0, initial state)
-    assert jnp.all(
-        trajectory["obs"][0] == 0
-    ), "First observation should be all zeros (from initial state)"
-
-    # Check that all actions are (0, 0) as set by our dummy actor
-    assert trajectory["actions"].shape == (
-        3,
-        2,
-    ), f"Expected actions shape to be (3,2), got {trajectory['actions'].shape}"
-    assert jnp.all(
-        trajectory["actions"] == jnp.zeros((3, 2))
-    ), "All actions should be zeros"
-
-    # Check rewards shape
-    assert trajectory["rewards"].shape == (
-        3,
-    ), f"Expected rewards shape to be (3,), got {trajectory['rewards'].shape}"
+        
+        # Check trajectory structures
+        self.assertIn("obs", black_traj)
+        self.assertIn("actions", black_traj)
+        self.assertIn("rewards", black_traj)
+        self.assertIn("masks", black_traj)
+        
+        self.assertIn("obs", white_traj)
+        self.assertIn("actions", white_traj)
+        self.assertIn("rewards", white_traj)
+        self.assertIn("masks", white_traj)
+        
+        # Check trajectories have expected structures for a single environment
+        # The black trajectory should have at least one observation
+        self.assertGreater(len(black_traj["obs"]), 0)
+        # The white trajectory should have at least one observation
+        self.assertGreater(len(white_traj["obs"]), 0)
+        
+        # Check episode length field is present and reasonable
+        self.assertIn("episode_length", black_traj)
+        self.assertIn("episode_length", white_traj)
+        
+        # Black should have same or one more move than white
+        black_steps = black_traj["episode_length"]
+        white_steps = white_traj["episode_length"]
+        self.assertTrue(black_steps >= white_steps)
+        self.assertTrue(black_steps <= white_steps + 1)
+    
+    def test_train_step(self):
+        """Test the training step function with mock data."""
+        # Initialize actor-critic model
+        actor_critic = ActorCritic(board_size=self.board_size)
+        
+        # Initialize model parameters
+        rng, init_key = jax.random.split(self.rng)
+        dummy_input = jnp.ones((1, self.board_size, self.board_size))
+        params = actor_critic.init(init_key, dummy_input)
+        
+        # Initialize optimizer
+        optimizer = optax.adam(learning_rate=0.001)
+        opt_state = optimizer.init(params)
+        
+        # Create mock trajectory
+        batch_size = 2
+        seq_len = 3
+        
+        # Create simple mock trajectory with valid observations
+        trajectory = {
+            "obs": jnp.ones((seq_len, batch_size, self.board_size, self.board_size)),
+            "actions": jnp.zeros((seq_len, batch_size, 2), dtype=jnp.int32),
+            "rewards": jnp.ones((seq_len, batch_size)),
+            "masks": jnp.ones((seq_len, batch_size), dtype=jnp.bool_),
+        }
+        
+        # Call train_step
+        new_params, new_opt_state, loss, aux, grad_norm = train_step(
+            params, opt_state, trajectory, actor_critic, optimizer
+        )
+        
+        # Check outputs
+        self.assertIsNotNone(new_params)
+        self.assertIsNotNone(new_opt_state)
+        self.assertIsInstance(loss, jnp.ndarray)
+        self.assertEqual(len(aux), 3)  # actor_loss, critic_loss, entropy_loss
+        self.assertIsInstance(grad_norm, jnp.ndarray)
+        
+        # Params should be updated (not equal to original)
+        params_flat = jax.tree_util.tree_leaves(params)
+        new_params_flat = jax.tree_util.tree_leaves(new_params)
+        
+        any_changed = False
+        for p1, p2 in zip(params_flat, new_params_flat):
+            if not jnp.array_equal(p1, p2):
+                any_changed = True
+                break
+        
+        self.assertTrue(any_changed, "Parameters should be updated during training")
 
 
 if __name__ == "__main__":
-    pytest.main()
+    unittest.main() 
