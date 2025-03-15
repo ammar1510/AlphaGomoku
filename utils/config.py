@@ -3,6 +3,7 @@ import os
 import random
 import glob
 import time
+import sys
 from flax import serialization
 import yaml
 import jax.random as jr
@@ -25,19 +26,11 @@ def load_config(config_path="cfg/train.yaml")->dict:
     """
     try:
         # Check if config path was provided via command line
-        import sys
-
         if len(sys.argv) > 1 and sys.argv[1].endswith(".yaml"):
             config_path = sys.argv[1]
-            logging.info(f"Using configuration from command line: {config_path}")
 
         with open(config_path, "r") as f:
             config = yaml.safe_load(f)
-
-        # Log the loaded configuration
-        logging.info(f"Loaded configuration from {config_path}:")
-        for key, value in config.items():
-            logging.info(f"  {key}: {value}")
 
         # Required parameters that must be present
         required_params = [
@@ -70,6 +63,29 @@ def load_config(config_path="cfg/train.yaml")->dict:
     except yaml.YAMLError as e:
         logging.error(f"Error parsing YAML configuration: {e}")
         raise
+
+
+def log_config(config, config_path="cfg/train.yaml"):
+    """
+    Log the configuration parameters.
+    
+    Args:
+        config: Configuration dictionary to log.
+        config_path: Path to the configuration file that was loaded.
+        
+    Returns:
+        None
+    """
+    # Log the configuration source
+    if len(sys.argv) > 1 and sys.argv[1].endswith(".yaml"):
+        logging.info(f"Using configuration from command line: {config_path}")
+    else:
+        logging.info(f"Using default configuration: {config_path}")
+    
+    # Log the loaded configuration
+    logging.info(f"Loaded configuration:")
+    for key, value in config.items():
+        logging.info(f"  {key}: {value}")
 
 
 def get_checkpoint_path(config)->str:
