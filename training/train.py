@@ -289,7 +289,6 @@ def run_episode(env_state, black_actor_critic, black_params, white_actor_critic,
     masks_truncated = masks[:actual_steps]
 
     discounted_rewards = discount_rewards(rewards_truncated, gamma)
-    logging.info("discounted_rewards: \n%s", np.array(discounted_rewards).tolist())
 
 
     # Split trajectories for black (even indices) and white (odd indices) players
