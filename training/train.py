@@ -13,10 +13,8 @@ from env.functional_gomoku import get_action_mask, init_env, reset_env, step_env
 from models.actor_critic import ActorCritic
 from utils.config import (
     get_checkpoint_path,
-    list_checkpoints,
-    select_random_checkpoint,
-    load_checkpoint,
     load_config,
+    log_config,
     save_checkpoint,
     select_training_checkpoints,
 )
@@ -30,7 +28,7 @@ from utils.logging_utils import setup_logging
 # )
 
 
-def init_train(config):
+def init_train(config: dict):
     """
     Initialize training components.
 
@@ -79,12 +77,16 @@ def init_train(config):
     # Update black model if checkpoint was loaded
     if loaded_black_params is not None:
         black_params = loaded_black_params
-        # Note: We're not using loaded_black_opt_state anymore
+        black_opt_state = loaded_black_opt_state
+    else:
+        black_opt_state = black_optimizer.init(black_params)
     
     # Update white model if checkpoint was loaded
     if loaded_white_params is not None:
         white_params = loaded_white_params
-        # Note: We're not using loaded_white_opt_state anymore
+        white_opt_state = loaded_white_opt_state
+    else:
+        white_opt_state = white_optimizer.init(white_params)
     
     # Log training initialization
     if loaded_black_params is not None or loaded_white_params is not None:
@@ -92,10 +94,6 @@ def init_train(config):
     else:
         logging.info("Starting training from scratch with new models.")
         
-    # Initialize optimizer states AFTER loading parameters
-    # This ensures optimizer states are always compatible with current parameters
-    black_opt_state = black_optimizer.init(black_params)
-    white_opt_state = white_optimizer.init(white_params)
 
     env = init_env(rng, board_size, num_boards)
 
@@ -392,26 +390,16 @@ def main():
     Main training loop using separate models for black and white players
     with self-play against randomly selected previous model versions.
     """
-    # Set up logging to both console and file
-    board_size = None
-    try:
-        # First, we need to get the board size to use in the log filename
-        config = load_config()
-        board_size = config["board_size"]
-    except Exception:
-        # If we can't load the config yet, use a generic name
-        pass
+    config = load_config()
+    board_size = config["board_size"]
     
-    # Set up logging with an appropriate name
-    log_filename = f"gomoku_training_{board_size}x{board_size}.log" if board_size else None
+    log_filename = f"gomoku_training_{board_size}x{board_size}.log"
     setup_logging(log_dir="logs", filename=log_filename)
+    
+    log_config(config)
     
     logging.info("Starting AlphaGomoku training...")
     logging.info(f"JAX devices: {jax.devices()}")
-    
-    # Now load the config again if needed (it will be logged now)
-    if not board_size:
-        config = load_config()
 
     (
         env,
@@ -433,35 +421,26 @@ def main():
     num_episodes = config["total_iterations"]
     checkpoint_interval = config["save_frequency"]
     gamma = config["discount"]
-    max_checkpoints = config["max_checkpoints"]
-
-    # Initialize opponent parameters at the beginning
-    black_opponent_params = black_params
-    white_opponent_params = white_params
     
     for episode in range(1, num_episodes + 1):
-        # Run episode with the selected models
         black_traj, white_traj, rng = run_episode(
             env, 
             black_actor_critic, 
-            black_opponent_params,  # Using opponent model for gameplay
+            black_params, 
             white_actor_critic, 
-            white_opponent_params,  # Using opponent model for gameplay
+            white_params,  
             gamma, 
             rng
         )
         
-        # Train black model on black's moves
         black_params, black_opt_state, black_loss, black_aux, black_grad_norm = train_step(
             black_params, black_opt_state, black_traj, black_actor_critic, black_optimizer
         )
         
-        # Train white model on white's moves
         white_params, white_opt_state, white_loss, white_aux, white_grad_norm = train_step(
             white_params, white_opt_state, white_traj, white_actor_critic, white_optimizer
         )
 
-        # Log training metrics for both models
         logging.info(
             f"Episode {episode}/{num_episodes}: "
             f"Black - Loss {black_loss:.4f} (Actor Loss {black_aux[0]:.4f}, "
@@ -472,42 +451,40 @@ def main():
             f"Grad Norm {white_grad_norm:.4f}"
         )
 
-        # Save checkpoints at defined intervals
         if episode % checkpoint_interval == 0:
-            # First save the current models
             save_checkpoint(black_params, black_opt_state, checkpoint_dir)
             save_checkpoint(white_params, white_opt_state, checkpoint_dir)
             logging.info(f"Saved both black and white models as checkpoints at episode {episode}")
             
-            # THEN select new opponent models for the next round of training
-            rng, black_key, white_key, select_key = jax.random.split(rng, 4)
+            rng, select_key = jax.random.split(rng, 2)
             
-            # Load potential opponent models from checkpoints
+            # Load checkpoints for potential use in next episodes
             loaded_black_params, loaded_black_opt_state, loaded_white_params, loaded_white_opt_state = select_training_checkpoints(checkpoint_dir, select_key)
             
-            # With 50% probability, use the current model, otherwise use loaded checkpoint
+            # Randomly decide whether to use checkpoint models or continue with current models
+            rng, black_key, white_key = jax.random.split(rng, 3)
+            
             if loaded_black_params is not None and jax.random.uniform(black_key) < 0.5:
-                black_opponent_params = loaded_black_params
-                black_opponent_opt_state = loaded_black_opt_state
-                logging.info("Using loaded checkpoint as black opponent")
+                black_params = loaded_black_params
+                black_opt_state = loaded_black_opt_state
+                logging.info("Switched to a randomly selected checkpoint for black player")
             else:
-                black_opponent_params = black_params
-                black_opponent_opt_state = black_opt_state
-                logging.info("Using current black model as black opponent")
+                logging.info("Continued with current black model")
             
             if loaded_white_params is not None and jax.random.uniform(white_key) < 0.5:
-                white_opponent_params = loaded_white_params
-                white_opponent_opt_state = loaded_white_opt_state
-                logging.info("Using loaded checkpoint as white opponent")
+                white_params = loaded_white_params
+                white_opt_state = loaded_white_opt_state
+                logging.info("Switched to a randomly selected checkpoint for white player")
             else:
-                white_opponent_params = white_params
-                white_opponent_opt_state = white_opt_state
-                logging.info("Using current white model as white opponent")
+                logging.info("Continued with current white model")
             
             logging.info(f"Selected models for next training round after episode {episode}")
+            
+            # TODO: Consider adding periodic evaluation here to measure model strength
+            # This could involve playing against a fixed baseline model or self-play with
+            # deterministic policy (argmax instead of sampling) to measure win rates
 
     logging.info("Training complete. Saving final model parameters.")
-    # Save both final models
     save_checkpoint(black_params, black_opt_state, checkpoint_dir)
     save_checkpoint(white_params, white_opt_state, checkpoint_dir)
 
