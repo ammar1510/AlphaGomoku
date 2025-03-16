@@ -16,7 +16,7 @@ eval_frequency: 50
 eval_games: 128
 
 # Checkpointing
-save_frequency: 50
+save_frequency: 2
 checkpoint_dir: "checkpoints"
 max_checkpoints: 10
 # Miscellaneous
