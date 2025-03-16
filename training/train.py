@@ -223,8 +223,7 @@ def run_episode(env_state, black_actor_critic, black_params, white_actor_critic,
     @partial(jit, static_argnames=["actor_critic"])
     def white_turn_fn(state, actor_critic, params):
         policy_logits, value = actor_critic.apply(params, state["obs"])
-        action_mask = get_action_mask(state["env_state"])
-        logits = jnp.where(action_mask, policy_logits, -jnp.inf)
+        logits = actor_critic.mask_invalid_actions(policy_logits, state["env_state"]["board"])
 
         rng, subkey = jax.random.split(state["rng"])
         action = actor_critic.sample_action(logits, subkey)
