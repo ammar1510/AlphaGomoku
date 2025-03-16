@@ -437,7 +437,6 @@ def main():
     logging.info(f"Entropy annealing: initial={initial_entropy_coef}, "
                  f"min={min_entropy_coef}, decay_steps={entropy_decay_steps}")
     
-    last_logged_entropy_coef = initial_entropy_coef
     entropy_log_threshold = 0.1  # Log when entropy coefficient changes by 10%
     
     for episode in range(1, num_episodes + 1):
@@ -448,11 +447,6 @@ def main():
             min_entropy_coef
         )
         
-        # Log entropy coefficient when it changes significantly
-        if (abs(current_entropy_coef - last_logged_entropy_coef) / last_logged_entropy_coef > entropy_log_threshold or
-            episode == 1 or episode % 1000 == 0):
-            logging.info(f"Episode {episode}: Entropy coefficient is now {current_entropy_coef:.6f}")
-            last_logged_entropy_coef = current_entropy_coef
         
         black_traj, white_traj, rng = run_episode(
             env, 
