@@ -17,6 +17,7 @@ dependencies = [
     "numpy>=1.24.0",
     "pyyaml>=6.0.0",
     "matplotlib>=3.7.0",
+    "orbax-checkpoint>=0.4.1",
 ]
 
 [project.urls]

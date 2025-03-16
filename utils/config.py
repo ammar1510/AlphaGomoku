@@ -200,18 +200,19 @@ def manage_checkpoint_pool(checkpoint_dir, max_checkpoints=10):
                 logging.error(f"Error removing checkpoint {checkpoint}: {e}")
 
 
-def save_checkpoint(params, opt_state, checkpoint_dir):
+def save_checkpoint(params, checkpoint_dir):
     """
     Save network checkpoint using a timestamp-based naming scheme.
+    Only saves model parameters, not optimizer state.
 
     Args:
-      params: network parameters.
-      opt_state: optimizer state (optional).
+      params: network parameters to save.
       checkpoint_dir: Directory for checkpoints.
 
     Returns: None.
     """
-    checkpoint = {"params": params, "opt_state": opt_state}
+    # Only save params, not opt_state
+    checkpoint = {"params": params}
 
     checkpoint_path = get_checkpoint_filename(checkpoint_dir)
     
@@ -221,6 +222,7 @@ def save_checkpoint(params, opt_state, checkpoint_dir):
     logging.info(
         f"Model checkpoint saved to {checkpoint_path}"
     )
+    time.sleep(0.3)
     
     # Manage the checkpoint pool
     manage_checkpoint_pool(checkpoint_dir, max_checkpoints=10)
@@ -229,32 +231,35 @@ def save_checkpoint(params, opt_state, checkpoint_dir):
 def load_checkpoint(checkpoint_path):
     """
     Load network checkpoint.
+    Only loads model parameters, not optimizer state.
 
     Args:
       checkpoint_path: File path for checkpoint.
 
     Returns:
-      A tuple (params, opt_state) if the checkpoint exists, 
-      or (None, None) if not.
+      A tuple (params, None) if the checkpoint exists, 
+      or (None, None) if not. The second element is always None
+      since we no longer store optimizer state.
     """
     try:
         with open(checkpoint_path, "rb") as f:
             data = f.read()
         
-        # Create template with opt_state field
-        template = {"params": None, "opt_state": None}
+        # Create template with only params field
+        template = {"params": None}
         checkpoint = serialization.from_bytes(template, data)
         
         logging.info(
             f"Model checkpoint loaded from {checkpoint_path}"
         )
+        assert checkpoint["params"] is not None
         
-        return checkpoint["params"], checkpoint["opt_state"]
+        return checkpoint["params"]
     except FileNotFoundError:
-        logging.info(
+        logging.warning(
             f"Model checkpoint not found at {checkpoint_path}."
         )
-        return None, None
+        return None
 
 
 def select_training_checkpoints(checkpoint_dir, rng_key=None):
@@ -266,39 +271,29 @@ def select_training_checkpoints(checkpoint_dir, rng_key=None):
         rng_key: JAX random key for selection.
         
     Returns:
-        tuple: (black_params, black_opt_state, white_params, white_opt_state)
-              If no checkpoints or only one checkpoint exists, returns appropriate None values.
+        tuple: (black_checkpoint_path, white_checkpoint_path)
+              If no checkpoints exist, returns (None, None).
+              If only one checkpoint exists, returns (path, None).
     """
     checkpoints = list_checkpoints(checkpoint_dir)
     
     if not checkpoints:
         logging.info("No checkpoints found. Both models will start from scratch.")
-        return None, None, None, None
+        return None, None
     
     if len(checkpoints) == 1:
-        # Only one checkpoint exists, one model will use it, the other will start fresh
-        params, opt_state = load_checkpoint(checkpoints[0])
-        logging.info(f"Only one checkpoint found. Black model will use it, white model will start from scratch.")
-        return params, opt_state, None, None
+        return checkpoints[0], None
     
-    # Select two different checkpoints
     if rng_key is not None:
         rng_key, subkey = jr.split(rng_key)
-        # Shuffle the checkpoints using JAX random
         indices = jr.permutation(subkey, len(checkpoints))
-        black_checkpoint = checkpoints[indices[0]]
-        white_checkpoint = checkpoints[indices[1]]
+        black_checkpoint_path = checkpoints[indices[0]]
+        white_checkpoint_path = checkpoints[indices[1]]
     else:
-        # Use Python's random if no JAX key provided
         selected_checkpoints = random.sample(checkpoints, 2)
-        black_checkpoint, white_checkpoint = selected_checkpoints
+        black_checkpoint_path, white_checkpoint_path = selected_checkpoints
     
-    # Load the checkpoints
-    black_params, black_opt_state = load_checkpoint(black_checkpoint)
-    white_params, white_opt_state = load_checkpoint(white_checkpoint)
     
-    logging.info(f"Loaded different checkpoints for black and white models.")
-    
-    return black_params, black_opt_state, white_params, white_opt_state
+    return black_checkpoint_path, white_checkpoint_path
 
 

@@ -1,13 +1,10 @@
 import logging
-import os
-import random
 from functools import partial
 
 import jax
 import jax.numpy as jnp
 import optax
 from jax import jit, lax
-import numpy as np
 
 from env.functional_gomoku import get_action_mask, init_env, reset_env, step_env
 from models.actor_critic import ActorCritic
@@ -17,6 +14,7 @@ from utils.config import (
     log_config,
     save_checkpoint,
     select_training_checkpoints,
+    load_checkpoint,
 )
 from utils.logging_utils import setup_logging
 
@@ -72,24 +70,28 @@ def init_train(config: dict):
     )
 
     # Load different checkpoints for black and white models if available
-    loaded_black_params, loaded_black_opt_state, loaded_white_params, loaded_white_opt_state = select_training_checkpoints(checkpoint_dir, init_key)
+    black_checkpoint_path, white_checkpoint_path = select_training_checkpoints(checkpoint_dir, init_key)
     
     # Update black model if checkpoint was loaded
-    if loaded_black_params is not None:
-        black_params = loaded_black_params
-        black_opt_state = loaded_black_opt_state
-    else:
-        black_opt_state = black_optimizer.init(black_params)
+    if black_checkpoint_path is not None:
+        loaded_black_params = load_checkpoint(black_checkpoint_path)
+        if loaded_black_params is not None:
+            black_params = loaded_black_params
+    
+    # Always initialize optimizer state from scratch
+    black_opt_state = black_optimizer.init(black_params)
     
     # Update white model if checkpoint was loaded
-    if loaded_white_params is not None:
-        white_params = loaded_white_params
-        white_opt_state = loaded_white_opt_state
-    else:
-        white_opt_state = white_optimizer.init(white_params)
+    if white_checkpoint_path is not None:
+        loaded_white_params = load_checkpoint(white_checkpoint_path)
+        if loaded_white_params is not None:
+            white_params = loaded_white_params
+    
+    # Always initialize optimizer state from scratch
+    white_opt_state = white_optimizer.init(white_params)
     
     # Log training initialization
-    if loaded_black_params is not None or loaded_white_params is not None:
+    if black_checkpoint_path is not None or white_checkpoint_path is not None:
         logging.info("Loaded existing model parameters from checkpoints.")
     else:
         logging.info("Starting training from scratch with new models.")
@@ -452,29 +454,35 @@ def main():
         )
 
         if episode % checkpoint_interval == 0:
-            save_checkpoint(black_params, black_opt_state, checkpoint_dir)
-            save_checkpoint(white_params, white_opt_state, checkpoint_dir)
+            save_checkpoint(black_params, checkpoint_dir)
+            save_checkpoint(white_params, checkpoint_dir)
             logging.info(f"Saved both black and white models as checkpoints at episode {episode}")
             
             rng, select_key = jax.random.split(rng, 2)
             
-            # Load checkpoints for potential use in next episodes
-            loaded_black_params, loaded_black_opt_state, loaded_white_params, loaded_white_opt_state = select_training_checkpoints(checkpoint_dir, select_key)
+            black_checkpoint_path, white_checkpoint_path = select_training_checkpoints(checkpoint_dir, select_key)
             
-            # Randomly decide whether to use checkpoint models or continue with current models
             rng, black_key, white_key = jax.random.split(rng, 3)
             
-            if loaded_black_params is not None and jax.random.uniform(black_key) < 0.5:
-                black_params = loaded_black_params
-                black_opt_state = loaded_black_opt_state
-                logging.info("Switched to a randomly selected checkpoint for black player")
+            if black_checkpoint_path is not None and jax.random.uniform(black_key) < 0.5:
+                loaded_black_params = load_checkpoint(black_checkpoint_path)
+                if loaded_black_params is not None:
+                    black_params = loaded_black_params
+                    black_opt_state = black_optimizer.init(black_params)
+                    logging.info(f"Switched to checkpoint {black_checkpoint_path} for black player")
+                else:
+                    logging.info("Failed to load black model checkpoint, continuing with current model")
             else:
                 logging.info("Continued with current black model")
             
-            if loaded_white_params is not None and jax.random.uniform(white_key) < 0.5:
-                white_params = loaded_white_params
-                white_opt_state = loaded_white_opt_state
-                logging.info("Switched to a randomly selected checkpoint for white player")
+            if white_checkpoint_path is not None and jax.random.uniform(white_key) < 0.5:
+                loaded_white_params = load_checkpoint(white_checkpoint_path)
+                if loaded_white_params is not None:
+                    white_params = loaded_white_params
+                    white_opt_state = white_optimizer.init(white_params)
+                    logging.info(f"Switched to checkpoint {white_checkpoint_path} for white player")
+                else:
+                    logging.info("Failed to load white model checkpoint, continuing with current model")
             else:
                 logging.info("Continued with current white model")
             
@@ -485,8 +493,8 @@ def main():
             # deterministic policy (argmax instead of sampling) to measure win rates
 
     logging.info("Training complete. Saving final model parameters.")
-    save_checkpoint(black_params, black_opt_state, checkpoint_dir)
-    save_checkpoint(white_params, white_opt_state, checkpoint_dir)
+    save_checkpoint(black_params, checkpoint_dir)
+    save_checkpoint(white_params, checkpoint_dir)
 
 
 if __name__ == "__main__":

@@ -86,10 +86,11 @@ class TestTrainingFunctions(unittest.TestCase):
         self.assertEqual(var_discounted.shape, variable_rewards.shape)
     
     @patch('training.train.select_training_checkpoints')
-    def test_init_train(self, mock_select_checkpoints):
+    @patch('training.train.load_checkpoint')
+    def test_init_train(self, mock_load_checkpoint, mock_select_checkpoints):
         """Test initialization of training components."""
         # Mock checkpoint selection to return None (no checkpoints)
-        mock_select_checkpoints.return_value = (None, None, None, None)
+        mock_select_checkpoints.return_value = (None, None)
         
         # Call init_train
         (env, black_ac, black_params, black_opt_state, black_optimizer,
@@ -113,10 +114,12 @@ class TestTrainingFunctions(unittest.TestCase):
         self.assertEqual(black_value.shape, (1,))
         self.assertEqual(white_value.shape, (1,))
         
-        # Now test with mock checkpoints
+        # Now test with mock checkpoint for black player
         dummy_params = MagicMock()
         dummy_opt_state = MagicMock()
-        mock_select_checkpoints.return_value = (dummy_params, dummy_opt_state, None, None)
+        black_checkpoint_path = "/fake/path/black_checkpoint.pkl"
+        mock_select_checkpoints.return_value = (black_checkpoint_path, None)
+        mock_load_checkpoint.return_value = (dummy_params, dummy_opt_state)
         
         # Call init_train again
         (env, black_ac, black_params, black_opt_state, black_optimizer,
@@ -124,11 +127,15 @@ class TestTrainingFunctions(unittest.TestCase):
          checkpoint_dir, rng, board_size) = init_train(self.test_config)
         
         # Check that black model uses loaded params
+        mock_load_checkpoint.assert_called_with(black_checkpoint_path)
         self.assertEqual(black_params, dummy_params)
         self.assertEqual(black_opt_state, dummy_opt_state)
         
         # Test with both black and white checkpoints
-        mock_select_checkpoints.return_value = (dummy_params, dummy_opt_state, dummy_params, dummy_opt_state)
+        black_checkpoint_path = "/fake/path/black_checkpoint.pkl"
+        white_checkpoint_path = "/fake/path/white_checkpoint.pkl"
+        mock_select_checkpoints.return_value = (black_checkpoint_path, white_checkpoint_path)
+        mock_load_checkpoint.side_effect = [(dummy_params, dummy_opt_state), (dummy_params, dummy_opt_state)]
         
         # Call init_train again
         (env, black_ac, black_params, black_opt_state, black_optimizer,
