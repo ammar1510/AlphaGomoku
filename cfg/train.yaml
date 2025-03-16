@@ -10,6 +10,12 @@ weight_decay: 0.0001
 discount: 0.99
 total_iterations: 1000000
 grad_clip_norm: 1.0
+
+# Entropy annealing
+initial_entropy_coef: 0.01   # Starting entropy coefficient
+min_entropy_coef: 0.0001      # Minimum entropy coefficient
+entropy_decay_steps: 50000   # Steps over which to decay entropy
+
 # Evaluation parameters
 #kept same as save_frequency
 eval_frequency: 50

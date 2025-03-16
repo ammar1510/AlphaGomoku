@@ -45,6 +45,9 @@ def load_config(config_path="cfg/train.yaml")->dict:
             "save_frequency",
             "grad_clip_norm",
             "seed",
+            "initial_entropy_coef",
+            "min_entropy_coef",
+            "entropy_decay_steps",
         ]
 
         # Check for missing parameters

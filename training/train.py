@@ -147,10 +147,6 @@ def discount_rewards(rewards, gamma):
 
 def run_episode(env_state, black_actor_critic, black_params, white_actor_critic, white_params, gamma, rng):
     """
-    Runs one episode using separate models for black and white players,
-    with pre-allocated arrays and masking for handling variable-length trajectories.
-    Uses lax.while_loop for JIT compatibility.
-
     Args:
       env_state: Dictionary containing the environment state.
       black_actor_critic: ActorCritic model for black player (first player).
@@ -312,7 +308,7 @@ def run_episode(env_state, black_actor_critic, black_params, white_actor_critic,
 
 
 @partial(jax.jit, static_argnums=(3, 4))
-def train_step(params, opt_state, trajectory, actor_critic, optimizer):
+def train_step(params, opt_state, trajectory, actor_critic, optimizer, entropy_coef):
     """
     Perform one training update with masked loss computation.
 
@@ -322,6 +318,7 @@ def train_step(params, opt_state, trajectory, actor_critic, optimizer):
       trajectory: collected trajectory with masks.
       actor_critic: network instance.
       optimizer: optax optimizer.
+      entropy_coef: coefficient for entropy regularization.
 
     Returns:
       (updated_params, updated_opt_state, loss, aux, grad_norm)
@@ -374,8 +371,9 @@ def train_step(params, opt_state, trajectory, actor_critic, optimizer):
         critic_loss = jnp.sum(masked_critic_loss) / valid_steps_sum
         entropy_loss = -jnp.sum(masked_entropy) / valid_steps_sum
 
-        total_loss = actor_loss + 0.5 * critic_loss + 0.01 * entropy_loss
-        return total_loss, (actor_loss, critic_loss, entropy_loss)
+        # Use the provided entropy coefficient
+        total_loss = actor_loss + 0.5 * critic_loss + entropy_coef * entropy_loss
+        return total_loss, (actor_loss, critic_loss, entropy_loss, entropy_coef)
 
     (loss, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
     grads = jax.tree_util.tree_map(
@@ -391,6 +389,13 @@ def main():
     """
     Main training loop using separate models for black and white players
     with self-play against randomly selected previous model versions.
+    
+    Features:
+    - Separate models for black and white players
+    - Self-play against randomly selected previous model versions
+    - Entropy coefficient annealing to balance exploration vs exploitation
+      (high entropy early in training encourages exploration, while
+      reducing entropy later encourages exploitation of learned strategies)
     """
     config = load_config()
     board_size = config["board_size"]
@@ -424,7 +429,31 @@ def main():
     checkpoint_interval = config["save_frequency"]
     gamma = config["discount"]
     
+    # Initialize entropy coefficient parameters
+    initial_entropy_coef = config["initial_entropy_coef"]
+    min_entropy_coef = config["min_entropy_coef"]
+    entropy_decay_steps = config["entropy_decay_steps"]
+    
+    logging.info(f"Entropy annealing: initial={initial_entropy_coef}, "
+                 f"min={min_entropy_coef}, decay_steps={entropy_decay_steps}")
+    
+    last_logged_entropy_coef = initial_entropy_coef
+    entropy_log_threshold = 0.1  # Log when entropy coefficient changes by 10%
+    
     for episode in range(1, num_episodes + 1):
+        # Calculate current entropy coefficient using exponential decay
+        progress = min(episode / entropy_decay_steps, 1.0)
+        current_entropy_coef = max(
+            initial_entropy_coef * (min_entropy_coef / initial_entropy_coef) ** progress,
+            min_entropy_coef
+        )
+        
+        # Log entropy coefficient when it changes significantly
+        if (abs(current_entropy_coef - last_logged_entropy_coef) / last_logged_entropy_coef > entropy_log_threshold or
+            episode == 1 or episode % 1000 == 0):
+            logging.info(f"Episode {episode}: Entropy coefficient is now {current_entropy_coef:.6f}")
+            last_logged_entropy_coef = current_entropy_coef
+        
         black_traj, white_traj, rng = run_episode(
             env, 
             black_actor_critic, 
@@ -436,20 +465,22 @@ def main():
         )
         
         black_params, black_opt_state, black_loss, black_aux, black_grad_norm = train_step(
-            black_params, black_opt_state, black_traj, black_actor_critic, black_optimizer
+            black_params, black_opt_state, black_traj, black_actor_critic, black_optimizer,
+            entropy_coef=current_entropy_coef
         )
         
         white_params, white_opt_state, white_loss, white_aux, white_grad_norm = train_step(
-            white_params, white_opt_state, white_traj, white_actor_critic, white_optimizer
+            white_params, white_opt_state, white_traj, white_actor_critic, white_optimizer,
+            entropy_coef=current_entropy_coef
         )
 
         logging.info(
             f"Episode {episode}/{num_episodes}: "
             f"Black - Loss {black_loss:.4f} (Actor Loss {black_aux[0]:.4f}, "
-            f"Critic Loss {black_aux[1]:.4f}, Entropy Loss {black_aux[2]:.4f}) | "
+            f"Critic Loss {black_aux[1]:.4f}, Entropy Loss {black_aux[2]:.4f}, Entropy Coef {black_aux[3]:.6f}) | "
             f"Grad Norm {black_grad_norm:.4f} | "
             f"White - Loss {white_loss:.4f} (Actor Loss {white_aux[0]:.4f}, "
-            f"Critic Loss {white_aux[1]:.4f}, Entropy Loss {white_aux[2]:.4f}) | "
+            f"Critic Loss {white_aux[1]:.4f}, Entropy Loss {white_aux[2]:.4f}, Entropy Coef {white_aux[3]:.6f}) | "
             f"Grad Norm {white_grad_norm:.4f}"
         )
 
