@@ -1,4 +1,4 @@
-from .functional_gomoku import (
+from .gomoku import (
     get_action_mask,
     init_env,
     is_game_over,
@@ -6,5 +6,3 @@ from .functional_gomoku import (
     sample_action,
     step_env,
 )
-from .gomoku import Gomoku
-from .renderer import GomokuRenderer
