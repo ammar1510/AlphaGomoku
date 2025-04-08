@@ -12,7 +12,7 @@ total_iterations: 1000000
 grad_clip_norm: 1.0
 
 # Entropy annealing
-initial_entropy_coef: 0.2   # increased this to increase exploration 
+initial_entropy_coef: 0.1   # increased this to increase exploration 
 min_entropy_coef: 0.0001      
 entropy_decay_steps: 50000   # Steps over which to decay entropy
 

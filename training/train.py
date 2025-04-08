@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import optax
 from jax import jit, lax
 
-from env.functional_gomoku import get_action_mask, init_env, reset_env, step_env
+from env.gomoku import get_action_mask, init_env, reset_env, step_env
 from models.actor_critic import ActorCritic
 from utils.config import (
     get_checkpoint_path,
@@ -63,39 +63,40 @@ def init_train(config: dict):
         optax.clip_by_global_norm(grad_clip_norm),
         optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay),
     )
-    
+
     white_optimizer = optax.chain(
         optax.clip_by_global_norm(grad_clip_norm),
         optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay),
     )
 
     # Load different checkpoints for black and white models if available
-    black_checkpoint_path, white_checkpoint_path = select_training_checkpoints(checkpoint_dir, init_key)
-    
+    black_checkpoint_path, white_checkpoint_path = select_training_checkpoints(
+        checkpoint_dir, init_key
+    )
+
     # Update black model if checkpoint was loaded
     if black_checkpoint_path is not None:
         loaded_black_params = load_checkpoint(black_checkpoint_path)
         if loaded_black_params is not None:
             black_params = loaded_black_params
-    
+
     # Always initialize optimizer state from scratch
     black_opt_state = black_optimizer.init(black_params)
-    
+
     # Update white model if checkpoint was loaded
     if white_checkpoint_path is not None:
         loaded_white_params = load_checkpoint(white_checkpoint_path)
         if loaded_white_params is not None:
             white_params = loaded_white_params
-    
+
     # Always initialize optimizer state from scratch
     white_opt_state = white_optimizer.init(white_params)
-    
+
     # Log training initialization
     if black_checkpoint_path is not None or white_checkpoint_path is not None:
         logging.info("Loaded existing model parameters from checkpoints.")
     else:
         logging.info("Starting training from scratch with new models.")
-        
 
     env = init_env(rng, board_size, num_boards)
 
@@ -138,14 +139,22 @@ def discount_rewards(rewards, gamma):
         return discounted_reversed[::-1]
 
     discounted = jax.vmap(discount_single, in_axes=1, out_axes=1)(rewards)
-    
+
     T = rewards.shape[0]
     alternating_signs = jnp.power(-1.0, jnp.arange(T) % 2)
-    
+
     return discounted * alternating_signs[:, None]
 
 
-def run_episode(env_state, black_actor_critic, black_params, white_actor_critic, white_params, gamma, rng):
+def run_episode(
+    env_state,
+    black_actor_critic,
+    black_params,
+    white_actor_critic,
+    white_params,
+    gamma,
+    rng,
+):
     """
     Args:
       env_state: Dictionary containing the environment state.
@@ -219,11 +228,13 @@ def run_episode(env_state, black_actor_critic, black_params, white_actor_critic,
             "step_idx": step_idx + 1,
             "rng": rng,
         }
-    
+
     @partial(jit, static_argnames=["actor_critic"])
     def white_turn_fn(state, actor_critic, params):
         policy_logits, value = actor_critic.apply(params, state["obs"])
-        logits = actor_critic.mask_invalid_actions(policy_logits, state["env_state"]["board"])
+        logits = actor_critic.mask_invalid_actions(
+            policy_logits, state["env_state"]["board"]
+        )
 
         rng, subkey = jax.random.split(state["rng"])
         action = actor_critic.sample_action(logits, subkey)
@@ -249,22 +260,26 @@ def run_episode(env_state, black_actor_critic, black_params, white_actor_critic,
         }
 
     @partial(jit, static_argnames=["black_actor_critic", "white_actor_critic"])
-    def body_fn(state, black_actor_critic, black_params, white_actor_critic, white_params):
+    def body_fn(
+        state, black_actor_critic, black_params, white_actor_critic, white_params
+    ):
         # Determine which player's turn it is (black: even steps starting at 0, white: odd steps)
         current_step = state["step_idx"]
-        is_black_turn = (current_step % 2 == 0)
-        
+        is_black_turn = current_step % 2 == 0
+
         # Use JAX's where for pure values selection, not for Python objects
         return jax.lax.cond(
             is_black_turn,
             lambda s: black_turn_fn(s, black_actor_critic, black_params),
             lambda s: white_turn_fn(s, white_actor_critic, white_params),
-            state
+            state,
         )
 
     # Create a wrapper for body_fn that includes both actor-critic models and their params
     def body_fn_wrapped(state):
-        return body_fn(state, black_actor_critic, black_params, white_actor_critic, white_params)
+        return body_fn(
+            state, black_actor_critic, black_params, white_actor_critic, white_params
+        )
 
     final_state = lax.while_loop(cond_fn, body_fn_wrapped, loop_state)
 
@@ -285,22 +300,21 @@ def run_episode(env_state, black_actor_critic, black_params, white_actor_critic,
 
     discounted_rewards = discount_rewards(rewards_truncated, gamma)
 
-
     # Split trajectories for black (even indices) and white (odd indices) players
     black_trajectory = {
         "obs": obs_truncated[::2],
         "actions": actions_truncated[::2],
         "rewards": discounted_rewards[::2],
         "masks": masks_truncated[::2],
-        "episode_length": (actual_steps + 1) // 2  # Ceiling division for odd lengths
+        "episode_length": (actual_steps + 1) // 2,  # Ceiling division for odd lengths
     }
-    
+
     white_trajectory = {
         "obs": obs_truncated[1::2],
         "actions": actions_truncated[1::2],
         "rewards": discounted_rewards[1::2],
         "masks": masks_truncated[1::2],
-        "episode_length": actual_steps // 2  # Floor division
+        "episode_length": actual_steps // 2,  # Floor division
     }
 
     return black_trajectory, white_trajectory, rng
@@ -388,7 +402,7 @@ def main():
     """
     Main training loop using separate models for black and white players
     with self-play against randomly selected previous model versions.
-    
+
     Features:
     - Separate models for black and white players
     - Self-play against randomly selected previous model versions
@@ -398,12 +412,12 @@ def main():
     """
     config = load_config()
     board_size = config["board_size"]
-    
+
     log_filename = f"gomoku_training_{board_size}x{board_size}.log"
     setup_logging(log_dir="logs", filename=log_filename)
-    
+
     log_config(config)
-    
+
     logging.info("Starting AlphaGomoku training...")
     logging.info(f"JAX devices: {jax.devices()}")
 
@@ -427,44 +441,58 @@ def main():
     num_episodes = config["total_iterations"]
     checkpoint_interval = config["save_frequency"]
     gamma = config["discount"]
-    
+
     # Initialize entropy coefficient parameters
     initial_entropy_coef = config["initial_entropy_coef"]
     min_entropy_coef = config["min_entropy_coef"]
     entropy_decay_steps = config["entropy_decay_steps"]
-    
-    logging.info(f"Entropy annealing: initial={initial_entropy_coef}, "
-                 f"min={min_entropy_coef}, decay_steps={entropy_decay_steps}")
-    
+
+    logging.info(
+        f"Entropy annealing: initial={initial_entropy_coef}, "
+        f"min={min_entropy_coef}, decay_steps={entropy_decay_steps}"
+    )
+
     entropy_log_threshold = 0.1  # Log when entropy coefficient changes by 10%
-    
+
     for episode in range(1, num_episodes + 1):
         # Calculate current entropy coefficient using exponential decay
         progress = min(episode / entropy_decay_steps, 1.0)
         current_entropy_coef = max(
-            initial_entropy_coef * (min_entropy_coef / initial_entropy_coef) ** progress,
-            min_entropy_coef
+            initial_entropy_coef
+            * (min_entropy_coef / initial_entropy_coef) ** progress,
+            min_entropy_coef,
         )
-        
-        
+
         black_traj, white_traj, rng = run_episode(
-            env, 
-            black_actor_critic, 
-            black_params, 
-            white_actor_critic, 
-            white_params,  
-            gamma, 
-            rng
+            env,
+            black_actor_critic,
+            black_params,
+            white_actor_critic,
+            white_params,
+            gamma,
+            rng,
         )
-        
-        black_params, black_opt_state, black_loss, black_aux, black_grad_norm = train_step(
-            black_params, black_opt_state, black_traj, black_actor_critic, black_optimizer,
-            entropy_coef=current_entropy_coef
+
+        black_params, black_opt_state, black_loss, black_aux, black_grad_norm = (
+            train_step(
+                black_params,
+                black_opt_state,
+                black_traj,
+                black_actor_critic,
+                black_optimizer,
+                entropy_coef=current_entropy_coef,
+            )
         )
-        
-        white_params, white_opt_state, white_loss, white_aux, white_grad_norm = train_step(
-            white_params, white_opt_state, white_traj, white_actor_critic, white_optimizer,
-            entropy_coef=current_entropy_coef
+
+        white_params, white_opt_state, white_loss, white_aux, white_grad_norm = (
+            train_step(
+                white_params,
+                white_opt_state,
+                white_traj,
+                white_actor_critic,
+                white_optimizer,
+                entropy_coef=current_entropy_coef,
+            )
         )
 
         logging.info(
@@ -480,38 +508,58 @@ def main():
         if episode % checkpoint_interval == 0:
             save_checkpoint(black_params, checkpoint_dir)
             save_checkpoint(white_params, checkpoint_dir)
-            logging.info(f"Saved both black and white models as checkpoints at episode {episode}")
-            
+            logging.info(
+                f"Saved both black and white models as checkpoints at episode {episode}"
+            )
+
             rng, select_key = jax.random.split(rng, 2)
-            
-            black_checkpoint_path, white_checkpoint_path = select_training_checkpoints(checkpoint_dir, select_key)
-            
+
+            black_checkpoint_path, white_checkpoint_path = select_training_checkpoints(
+                checkpoint_dir, select_key
+            )
+
             rng, black_key, white_key = jax.random.split(rng, 3)
-            
-            if black_checkpoint_path is not None and jax.random.uniform(black_key) < 0.5:
+
+            if (
+                black_checkpoint_path is not None
+                and jax.random.uniform(black_key) < 0.5
+            ):
                 loaded_black_params = load_checkpoint(black_checkpoint_path)
                 if loaded_black_params is not None:
                     black_params = loaded_black_params
                     black_opt_state = black_optimizer.init(black_params)
-                    logging.info(f"Switched to checkpoint {black_checkpoint_path} for black player")
+                    logging.info(
+                        f"Switched to checkpoint {black_checkpoint_path} for black player"
+                    )
                 else:
-                    logging.info("Failed to load black model checkpoint, continuing with current model")
+                    logging.info(
+                        "Failed to load black model checkpoint, continuing with current model"
+                    )
             else:
                 logging.info("Continued with current black model")
-            
-            if white_checkpoint_path is not None and jax.random.uniform(white_key) < 0.5:
+
+            if (
+                white_checkpoint_path is not None
+                and jax.random.uniform(white_key) < 0.5
+            ):
                 loaded_white_params = load_checkpoint(white_checkpoint_path)
                 if loaded_white_params is not None:
                     white_params = loaded_white_params
                     white_opt_state = white_optimizer.init(white_params)
-                    logging.info(f"Switched to checkpoint {white_checkpoint_path} for white player")
+                    logging.info(
+                        f"Switched to checkpoint {white_checkpoint_path} for white player"
+                    )
                 else:
-                    logging.info("Failed to load white model checkpoint, continuing with current model")
+                    logging.info(
+                        "Failed to load white model checkpoint, continuing with current model"
+                    )
             else:
                 logging.info("Continued with current white model")
-            
-            logging.info(f"Selected models for next training round after episode {episode}")
-            
+
+            logging.info(
+                f"Selected models for next training round after episode {episode}"
+            )
+
             # TODO: Consider adding periodic evaluation here to measure model strength
             # This could involve playing against a fixed baseline model or self-play with
             # deterministic policy (argmax instead of sampling) to measure win rates
