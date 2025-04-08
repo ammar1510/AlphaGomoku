@@ -49,15 +49,14 @@ def init_env(board_size, B, rng):
     Returns:
         env_state: Dictionary containing the environment state
     """
+
     return {
         "boards": jnp.zeros((B, board_size, board_size), dtype=jnp.float32),
-        "current_player": jnp.ones(
-            (B,), dtype=jnp.int32
-        ),  # 1 for black, -1 for white
+        "current_player": jnp.ones((B,), dtype=jnp.int32),
         "dones": jnp.zeros((B,), dtype=jnp.bool_),
         "winners": jnp.zeros((B,), dtype=jnp.int32),
         "board_size": board_size,
-        "num_boards": B,
+        "B": B,
         "rng": rng,
     }
 
@@ -77,7 +76,6 @@ def reset_env(env_state, new_rng=None):
     """
     B, board_size, _ = env_state["boards"].shape
 
-    # Use new RNG if provided, otherwise use the one from env_state
     rng = new_rng if new_rng is not None else jax.random.split(env_state["rng"])[0]
 
     new_env_state = {
@@ -86,7 +84,7 @@ def reset_env(env_state, new_rng=None):
         "dones": jnp.zeros((B,), dtype=jnp.bool_),
         "winners": jnp.zeros((B,), dtype=jnp.int32),
         "board_size": board_size,
-        "num_boards": B,
+        "B": B,
         "rng": rng,
     }
 
@@ -101,8 +99,8 @@ def check_win(board, current_player):
     Check for wins using convolution.
 
     Args:
-        board: Game boards with shape (num_boards, board_size, board_size)
-        current_player: Current player values with shape (num_boards,)
+        board: Game boards with shape (B, board_size, board_size)
+        current_player: Current player values with shape (B,)
 
     Returns:
         wins: Boolean array indicating which boards have wins
@@ -138,7 +136,7 @@ def get_action_mask(env_state):
         env_state: Current environment state
 
     Returns:
-        action_mask: Boolean mask of valid actions with shape (num_boards, board_size, board_size)
+        action_mask: Boolean mask of valid actions with shape (B, board_size, board_size)
     """
 
     boards = env_state["boards"]
@@ -158,7 +156,7 @@ def step_env(env_state, actions):
 
     Args:
         env_state: Current environment state
-        actions: Actions to take, shape (num_boards, 2) where each action is [row, col]
+        actions: Actions to take, shape (B, 2) where each action is [row, col]
 
     Returns:
         new_env_state: Updated environment state
@@ -177,7 +175,6 @@ def step_env(env_state, actions):
     B, board_size, _ = boards.shape
 
     rows, cols = actions.T
-
 
     new_boards = boards.at[jnp.arange(B), rows, cols].set(current_player)
 
@@ -254,6 +251,7 @@ def is_game_over(env_state):
     """
     return env_state["dones"]
 
+
 @jax.jit
 def get_valid_actions(env_state):
     """
@@ -268,18 +266,15 @@ def get_valid_actions(env_state):
     action_mask = get_action_mask(env_state)
     board_size = env_state["board_size"]
 
-    # Get shapes directly from the array dimensions
     num_envs, height, width = action_mask.shape
 
-    # Create meshgrid of all possible actions
     rows, cols = jnp.meshgrid(jnp.arange(width), jnp.arange(height))
     all_actions = jnp.stack([rows.flatten(), cols.flatten()], axis=1)
 
-    # For each board, filter valid actions
     def get_board_valid_actions(board_idx):
         board_mask = action_mask[board_idx].flatten()
         valid_indices = jnp.where(board_mask, size=height * width)[0]
-        # Pad with -1 to ensure fixed size
+
         padded_indices = jnp.pad(
             valid_indices,
             (0, height * width - valid_indices.shape[0]),
@@ -287,20 +282,19 @@ def get_valid_actions(env_state):
         )
         return all_actions[padded_indices]
 
-    # Map over all boards
     valid_actions = jax.vmap(get_board_valid_actions)(jnp.arange(num_envs))
 
     return valid_actions
 
 
-@partial(jax.jit, static_argnums=(0, 1))  # Mark board_size and num_boards as static
-def run_random_episode(board_size=15, num_boards=256, seed=0):
+@partial(jax.jit, static_argnums=(0, 1))  # Mark board_size and B as static
+def run_random_episode(board_size=15, B=256, seed=0):
     """
     Run a complete episode with random actions.
 
     Args:
         board_size: Size of the Gomoku board
-        num_boards: Number of parallel boards
+        B: Number of parallel boards
         seed: Random seed
 
     Returns:
@@ -309,11 +303,11 @@ def run_random_episode(board_size=15, num_boards=256, seed=0):
     """
     # Initialize environment
     rng = jax.random.PRNGKey(seed)
-    init_state = init_env(board_size, num_boards, rng)
+    init_state = init_env(board_size, B, rng)
     env_state, obs = reset_env(init_state)
 
     # Initialize total rewards
-    total_rewards = jnp.zeros((num_boards,))
+    total_rewards = jnp.zeros((B,))
 
     # Define loop body function
     def body_fun(loop_state):
@@ -356,7 +350,7 @@ def render(env_state, board_idx=0, mode="unicode"):
         board_str: String representation of the board
     """
     # Ensure board_idx is within range
-    board_idx = min(board_idx, env_state["num_boards"] - 1)
+    board_idx = min(board_idx, env_state["B"] - 1)
 
     # Get board state and size
     boards = env_state["boards"]

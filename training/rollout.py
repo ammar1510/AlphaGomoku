@@ -5,9 +5,49 @@ from functools import partial
 
 from env.gomoku import get_action_mask, reset_env, step_env
 
-# there's a distinction between rewards and returns
-# rewards are the immediate rewards from the environment
-# returns are the sum of rewards from this point onwards down the line
+
+def _initialize_trajectory_buffers(env_state, max_steps):
+    """Initializes buffers to store trajectory data."""
+    B, board_size, _ = env_state["boards"].shape
+    observations = jnp.zeros((max_steps, B, board_size, board_size), dtype=jnp.float32)
+    actions = jnp.zeros((max_steps, B, 2), dtype=jnp.int32)
+    rewards = jnp.zeros((max_steps, B), dtype=jnp.float32)
+    masks = jnp.zeros((max_steps, B), dtype=jnp.bool_)
+    logprobs = jnp.zeros((max_steps, B), dtype=jnp.float32)
+    return observations, actions, rewards, masks, logprobs
+
+
+@partial(jit, static_argnames=["actor_critic"])
+def player_move(loop_state, actor_critic, params):
+    """Takes a single step in the environment using the provided actor-critic."""
+    policy_logits, _ = actor_critic.apply(params, loop_state["obs"])
+    action_mask = get_action_mask(loop_state["env_state"])
+    masked_logits = jnp.where(action_mask, policy_logits, -jnp.inf)
+
+    rng, subkey = jax.random.split(loop_state["rng"])
+    action = actor_critic.sample_action(masked_logits, subkey)
+    logprob = actor_critic.log_prob(masked_logits, action)
+    step_idx = loop_state["step_idx"]
+    active_mask = ~loop_state["env_state"]["dones"]
+
+    observations = loop_state["observations"].at[step_idx].set(loop_state["obs"])
+    actions = loop_state["actions"].at[step_idx].set(action)
+    masks = loop_state["masks"].at[step_idx].set(active_mask)
+    logprobs = loop_state["logprobs"].at[step_idx].set(logprob)
+    next_env_state, obs, step_rewards, dones = step_env(loop_state["env_state"], action)
+    rewards = loop_state["rewards"].at[step_idx].set(step_rewards)
+
+    return {
+        "env_state": next_env_state,
+        "obs": obs,
+        "observations": observations,
+        "actions": actions,
+        "rewards": rewards,
+        "masks": masks,
+        "logprobs": logprobs,
+        "step_idx": step_idx + 1,
+        "rng": rng,
+    }
 
 
 @partial(jax.jit, static_argnames=["actor_critic"])
@@ -20,7 +60,6 @@ def run_selfplay(env_state, actor_critic, params, rng):
         actor_critic: ActorCritic model
         params: Model parameters
         rng: JAX random key
-        gamma: Discount factor for rewards
 
     Returns:
         trajectory: dict with collected data (obs, actions, rewards, masks)
@@ -31,13 +70,9 @@ def run_selfplay(env_state, actor_critic, params, rng):
     B, board_size, _ = env_state["boards"].shape
     max_steps = board_size * board_size
 
-
-    observations = jnp.zeros(
-        (max_steps, B, board_size, board_size), dtype=jnp.float32
+    observations, actions, rewards, masks, logprobs = _initialize_trajectory_buffers(
+        env_state, max_steps
     )
-    actions = jnp.zeros((max_steps, B, 2), dtype=jnp.int32)
-    rewards = jnp.zeros((max_steps, B), dtype=jnp.float32)
-    masks = jnp.zeros((max_steps, B), dtype=jnp.bool_)
 
     loop_state = {
         "env_state": env_state,
@@ -46,6 +81,7 @@ def run_selfplay(env_state, actor_critic, params, rng):
         "actions": actions,
         "rewards": rewards,
         "masks": masks,
+        "logprobs": logprobs,
         "step_idx": 0,
         "rng": rng,
     }
@@ -54,37 +90,12 @@ def run_selfplay(env_state, actor_critic, params, rng):
         return ~jnp.all(state["env_state"]["dones"])
 
     def body_fn(state):
-        policy_logits,_ = actor_critic.apply(params, state["obs"])
-        action_mask = get_action_mask(state["env_state"])
-        masked_logits = jnp.where(action_mask, policy_logits, -jnp.inf)
-
-        rng, subkey = jax.random.split(state["rng"])
-        action = actor_critic.sample_action(masked_logits, subkey)
-
-        step_idx = state["step_idx"]
-        active_mask = ~state["env_state"]["dones"]
-
-        observations = state["observations"].at[step_idx].set(state["obs"])
-        actions = state["actions"].at[step_idx].set(action)
-        masks = state["masks"].at[step_idx].set(active_mask)
-
-        next_env_state, obs, step_rewards, dones = step_env(state["env_state"], action)
-        rewards = state["rewards"].at[step_idx].set(step_rewards)
-
-        return {
-            "env_state": next_env_state,
-            "obs": obs,
-            "observations": observations,
-            "actions": actions,
-            "rewards": rewards,
-            "masks": masks,
-            "step_idx": step_idx + 1,
-            "rng": rng,
-        }
+        return player_move(state, actor_critic, params)
 
     trajectory = lax.while_loop(cond_fn, body_fn, loop_state)
     trajectory["T"] = trajectory["step_idx"]
     trajectory.pop("step_idx")
+
     return trajectory, trajectory["rng"]
 
 
@@ -118,13 +129,9 @@ def run_episode(
     B, board_size, _ = env_state["boards"].shape
     max_steps = board_size * board_size
 
-    observations = jnp.zeros(
-        (max_steps, B, board_size, board_size), dtype=jnp.float32
+    observations, actions, rewards, masks, logprobs = _initialize_trajectory_buffers(
+        env_state, max_steps
     )
-    actions = jnp.zeros((max_steps, B, 2), dtype=jnp.int32)
-    rewards = jnp.zeros((max_steps, B), dtype=jnp.float32)
-    masks = jnp.zeros((max_steps, B), dtype=jnp.bool_)
-
     initial_loop_state = {
         "env_state": env_state,
         "obs": obs,
@@ -132,44 +139,13 @@ def run_episode(
         "actions": actions,
         "rewards": rewards,
         "masks": masks,
+        "logprobs": logprobs,
         "step_idx": 0,
         "rng": rng,
     }
 
-    @jit
     def cond_fn(state):
         return ~jnp.all(state["env_state"]["dones"])
-
-    @partial(jit, static_argnames=["actor_critic"])
-    def player_move(loop_state, actor_critic, params):
-        policy_logits, value = actor_critic.apply(params, loop_state["obs"])
-        action_mask = get_action_mask(loop_state["env_state"])
-        logits = jnp.where(action_mask, policy_logits, -jnp.inf)
-
-        rng, subkey = jax.random.split(loop_state["rng"])
-        action = actor_critic.sample_action(logits, subkey)
-
-        step_idx = loop_state["step_idx"]
-        active_mask = ~loop_state["env_state"]["dones"]
-        observations = loop_state["observations"].at[step_idx].set(loop_state["obs"])
-        actions = loop_state["actions"].at[step_idx].set(action)
-        masks = loop_state["masks"].at[step_idx].set(active_mask)
-
-        next_env_state, obs, step_rewards, dones = step_env(
-            loop_state["env_state"], action
-        )
-        rewards = loop_state["rewards"].at[step_idx].set(step_rewards)
-
-        return {
-            "env_state": next_env_state,
-            "obs": obs,
-            "observations": observations,
-            "actions": actions,
-            "rewards": rewards,
-            "masks": masks,
-            "step_idx": step_idx + 1,
-            "rng": rng,
-        }
 
     @partial(jit, static_argnames=["black_actor_critic", "white_actor_critic"])
     def body_fn(
@@ -198,6 +174,7 @@ def run_episode(
     actions = final_state["actions"]
     rewards = final_state["rewards"]
     masks = final_state["masks"]
+    logprobs = final_state["logprobs"]
     rng = final_state["rng"]
 
     total_steps = step_idx
@@ -207,6 +184,7 @@ def run_episode(
         "actions": actions[::2],  # Shape: ((T+1)//2, B, 2)
         "rewards": rewards[::2],  # Shape: ((T+1)//2, B)
         "masks": masks[::2],  # Shape: ((T+1)//2, B)
+        "logprobs": logprobs[::2],  # Shape: ((T+1)//2, B)
         "T": (total_steps + 1) // 2,  # Shape: ()
     }
 
@@ -215,6 +193,7 @@ def run_episode(
         "actions": actions[1::2],  # Shape: (T//2, B, 2)
         "rewards": rewards[1::2],  # Shape: (T//2, B)
         "masks": masks[1::2],  # Shape: (T//2, B)
+        "logprobs": logprobs[1::2],  # Shape: (T//2, B)
         "T": total_steps // 2,  # Shape: ()
     }
 
@@ -276,5 +255,7 @@ def calculate_gae(rewards, values, dones, gamma=0.99, gae_lambda=0.95):
         _, advantages = jax.lax.scan(scan_fn, (0.0, 0.0), step_data, reverse=True)
         return advantages
 
-    advantages = jax.vmap(gae_single, in_axes=(1, 1, 1, None, None), out_axes=1)(rewards, values, dones, gamma, gae_lambda)
+    advantages = jax.vmap(gae_single, in_axes=(1, 1, 1, None, None), out_axes=1)(
+        rewards, values, dones, gamma, gae_lambda
+    )
     return advantages
