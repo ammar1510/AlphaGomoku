@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Dict, Tuple, Any, Optional
 
-from models.actor_critic import ActorCritic
-from training.rollout import calculate_gae, calculate_returns, run_episode
+# Assuming PongActorCritic is the correct model type
+from models.pong_actor_critic import PongActorCritic
+from training.rollout import calculate_gae, run_pong_episode # Use the new rollout function
+from env.pong import init_env, reset_env, step_env, NUM_ACTIONS, OBSERVATION_SHAPE
 
 
 @dataclass
@@ -22,29 +24,28 @@ class PPOConfig:
     gae_lambda: float
     update_epochs: int
     seed: int
+    batch_size: int # Add batch size for environment vectorization
+    # num_steps: int # REMOVED: Not relevant for full-episode rollouts
 
 
 class PPOTrainer:
     """
-    PPO implementation that uses shared trajectory collection for two players.
+    PPO implementation for a single agent (e.g., Atari).
     """
 
     def __init__(
         self,
-        black_actor_critic: ActorCritic,
-        white_actor_critic: ActorCritic,
+        actor_critic: PongActorCritic, # Single ActorCritic model
         config: PPOConfig,
     ):
         """
         Initialize the PPO trainer.
 
         Args:
-            black_actor_critic: ActorCritic model instance for the black player.
-            white_actor_critic: ActorCritic model instance for the white player.
+            actor_critic: ActorCritic model instance.
             config: PPO configuration parameters.
         """
-        self.black_actor_critic = black_actor_critic
-        self.white_actor_critic = white_actor_critic
+        self.actor_critic = actor_critic
         self.clip_ratio = config.clip_ratio
         self.value_coef = config.value_coef
         self.entropy_coef = config.entropy_coef
@@ -52,45 +53,50 @@ class PPOTrainer:
         self.gamma = config.gamma
         self.gae_lambda = config.gae_lambda
         self.update_epochs = config.update_epochs
+        self.batch_size = config.batch_size # For env vectorization (though Pong wrapper currently supports B=1)
+        # self.num_steps = config.num_steps # REMOVED
 
-        self.black_optimizer = optax.chain(
-            optax.clip_by_global_norm(config.max_grad_norm),
-            optax.adam(config.learning_rate),
-        )
-
-        self.white_optimizer = optax.chain(
+        self.optimizer = optax.chain(
             optax.clip_by_global_norm(config.max_grad_norm),
             optax.adam(config.learning_rate),
         )
 
         self.rng = jax.random.PRNGKey(config.seed)
 
+        # Initialize environment state
+        env_rng, self.rng = jax.random.split(self.rng)
+        # NOTE: Pong env currently only supports B=1. Adapt if needed.
+        self.env_state = init_env(B=1, rng=env_rng)
+
     def prepare_batch(
         self, trajectory: Dict[str, jnp.ndarray]
     ) -> Dict[str, jnp.ndarray]:
         """
         Process collected trajectories into training batches.
+        Assumes trajectories always contain the terminal state.
 
         Args:
-            trajectory: Collected trajectory data for a single player.
+            trajectory: Collected trajectory data.
 
         Returns:
             dict: Processed batch data including returns and advantages.
         """
-        T, B, board_size, _ = trajectory["obs"].shape
+        # GAE Calculation uses the collected values. last_value is not needed.
         rewards = trajectory["rewards"]
-        values = trajectory["values"]
-        dones = trajectory["masks"]
-        # yet to add reshaping logic
+        values = trajectory["values"] # Values estimated during rollout
+        dones = trajectory["dones"] # Done flags for each step
 
         advantages = calculate_gae(rewards, values, dones, self.gamma, self.gae_lambda)
+        returns = advantages + values # N.B. Values here are V(s_t) from rollout
 
-        returns = values + advantages
+        # Reshape for training: Flatten T and B dimensions
+        # Ensure trajectory doesn't contain 'last_obs' anymore
+        batch = {k: v.reshape(-1, *v.shape[2:]) for k, v in trajectory.items() if k != "T"}
 
-        batch = {**trajectory}
-        batch["returns"] = returns
-        batch["advantages"] = advantages
+        batch["returns"] = returns.reshape(-1)
+        batch["advantages"] = advantages.reshape(-1)
 
+        # Normalize advantages
         batch["advantages"] = (batch["advantages"] - jnp.mean(batch["advantages"])) / (
             jnp.std(batch["advantages"]) + 1e-8
         )
@@ -99,51 +105,37 @@ class PPOTrainer:
 
     def update(
         self,
-        actor_critic: ActorCritic,
-        params: Any,  # Typically flax.core.FrozenDict, but Any for generality
+        params: Any,
         batch: Dict[str, jnp.ndarray],
-        optimizer: optax.GradientTransformation,
         opt_state: optax.OptState,
     ) -> Tuple[Any, optax.OptState, Dict[str, jnp.ndarray]]:
         """
-        Perform PPO updates for a single agent over multiple epochs.
-
-        Args:
-            actor_critic: The ActorCritic model instance.
-            params: Current model parameters.
-            batch: Processed batch data for training.
-            optimizer: The Optax optimizer.
-            opt_state: Current optimizer state.
-
-        Returns:
-            tuple: (updated_params, updated_opt_state, metrics averaged over epochs).
+        Perform PPO updates for the single agent over multiple epochs.
+        (Code is similar to the two-player version, just without distinguishing black/white)
         """
 
         def loss_fn(params: Any) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
             """Calculates the PPO loss and associated metrics."""
-            new_log_probs, entropy, values = actor_critic.evaluate_actions(
-                batch["obs"], batch["actions"]
+            # Use the single agent's actor_critic model
+            # Call evaluate_actions via apply, passing the params
+            new_log_probs, entropy, values = self.actor_critic.apply(
+                {'params': params},
+                batch["obs"],
+                batch["actions"],
+                method=self.actor_critic.evaluate_actions
             )
 
-            # print("Shapes - new_log_probs:", new_log_probs.shape, "batch[log_probs]:", batch["log_probs"].shape)
-
             ratio = jnp.exp(new_log_probs - batch["log_probs"])
-
             advantages = batch["advantages"]
-            # print("Shapes - ratio:", ratio.shape, "advantages:", advantages.shape)
 
             surrogate1 = ratio * advantages
             surrogate2 = (
                 jnp.clip(ratio, 1.0 - self.clip_ratio, 1.0 + self.clip_ratio)
                 * advantages
             )
-
             policy_loss = -jnp.mean(jnp.minimum(surrogate1, surrogate2))
 
-            # Ensure shapes are compatible for subtraction
-            # print("Shapes - values:", values.shape, "batch[returns]:", batch["returns"].shape)
             value_loss = jnp.mean(jnp.square(values - batch["returns"]))
-
             entropy_loss = -jnp.mean(entropy)
 
             total_loss = (
@@ -152,7 +144,6 @@ class PPOTrainer:
                 + self.entropy_coef * entropy_loss
             )
 
-            # Approximate KL divergence and clip fraction for diagnostics
             approx_kl = jnp.mean((ratio - 1) - jnp.log(ratio))
             clip_fraction = jnp.mean(jnp.greater(jnp.abs(ratio - 1.0), self.clip_ratio))
 
@@ -160,106 +151,64 @@ class PPOTrainer:
                 "total_loss": total_loss,
                 "policy_loss": policy_loss,
                 "value_loss": value_loss,
-                "entropy": -entropy_loss,  # Report positive entropy
+                "entropy": -entropy_loss,
                 "approx_kl": approx_kl,
                 "clip_fraction": clip_fraction,
             }
-
             return total_loss, metrics
 
-        @jax.jit  # Jit the update step for a single epoch
+        #@jax.jit
         def update_epoch(
             carry: Tuple[Any, optax.OptState], _
         ) -> Tuple[Tuple[Any, optax.OptState], Dict[str, jnp.ndarray]]:
-            """Performs a single gradient update step."""
             params, opt_state = carry
             (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
-            updates, new_opt_state = optimizer.update(
-                grads, opt_state, params
-            )  # Pass params to optimizer update if needed (e.g., for AdamW)
+            updates, new_opt_state = self.optimizer.update(grads, opt_state, params)
             new_params = optax.apply_updates(params, updates)
             return (new_params, new_opt_state), metrics
 
-        # Run scan over update epochs
         (new_params, new_opt_state), metrics_history = jax.lax.scan(
             update_epoch, (params, opt_state), None, length=self.update_epochs
         )
-
-        # Average metrics over epochs
         metrics = jax.tree_map(jnp.mean, metrics_history)
-
         return new_params, new_opt_state, metrics
 
     def train_step(
         self,
-        black_params: Any,
-        white_params: Any,
-        black_optimizer_state: optax.OptState,
-        white_optimizer_state: optax.OptState,
-        env_state: Any,
-    ) -> Tuple[
-        Any, optax.OptState, Any, optax.OptState, Dict[str, jnp.ndarray], jnp.ndarray
-    ]:
+        params: Any,
+        optimizer_state: optax.OptState,
+    ) -> Tuple[Any, optax.OptState, Dict[str, jnp.ndarray], Any]: # Return updated env_state
         """
-        Performs a single training step including rollout and updates for both players.
+        Performs a single training step including rollout and update.
 
         Args:
-            black_params: Current parameters for the black player's model.
-            white_params: Current parameters for the white player's model.
-            black_optimizer_state: Current optimizer state for the black player.
-            white_optimizer_state: Current optimizer state for the white player.
-            env_state: The current state of the environment.
+            params: Current model parameters.
+            optimizer_state: Current optimizer state.
 
         Returns:
-            tuple: (updated_black_params, updated_black_opt_state,
-                    updated_white_params, updated_white_opt_state,
-                    combined_metrics, updated_rng_key)
+            tuple: (updated_params, updated_opt_state, metrics, updated_env_state, updated_rng)
         """
-        # Generate trajectories for both players from a single episode
+        # Generate trajectory using the Pong-specific rollout
         rollout_rng, self.rng = jax.random.split(self.rng)
-        black_trajectory, white_trajectory, _ = run_episode(
-            env_state,
-            self.black_actor_critic,
-            black_params,
-            self.white_actor_critic,
-            white_params,
-            rollout_rng,
+        trajectory, final_env_state, _ = run_pong_episode(
+            self.env_state, self.actor_critic, params, rollout_rng
         )
 
-        # Prepare batches for each player
-        black_player_batch = self.prepare_batch(black_trajectory)
-        white_player_batch = self.prepare_batch(white_trajectory)
+        # Update env_state for the next step
+        self.env_state = final_env_state
 
-        # Update black player
-        new_black_params, new_black_opt_state, black_metrics = self.update(
-            self.black_actor_critic,
-            black_params,
-            black_player_batch,
-            self.black_optimizer,
-            black_optimizer_state,
+        # Prepare batch - No longer needs params
+        batch = self.prepare_batch(trajectory)
+
+        # Update agent
+        new_params, new_opt_state, metrics = self.update(
+            params,
+            batch,
+            optimizer_state,
         )
 
-        # Update white player
-        new_white_params, new_white_opt_state, white_metrics = self.update(
-            self.white_actor_critic,
-            white_params,
-            white_player_batch,
-            self.white_optimizer,
-            white_optimizer_state,
-        )
+        # Add episode return/length to metrics if available
+        metrics["episode_return"] = trajectory["rewards"].sum()
+        metrics["episode_length"] = trajectory["T"]
 
-        # Consolidate metrics
-        combined_metrics = {f"black/{k}": v for k, v in black_metrics.items()}
-        combined_metrics.update({f"white/{k}": v for k, v in white_metrics.items()})
-
-        # Include average episode return/length if available from run_episode
-        # Example: combined_metrics["episode_return"] = black_trajectory["rewards"].sum() # Or some other logic
-
-        return (
-            new_black_params,
-            new_black_opt_state,
-            new_white_params,
-            new_white_opt_state,
-            combined_metrics,
-            self.rng,
-        )
+        return new_params, new_opt_state, metrics, self.rng

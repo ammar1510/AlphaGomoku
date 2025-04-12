@@ -79,6 +79,9 @@ Thumbs.db
 # Project Specific (AlphaGomoku)
 alphagomoku.egg-info/ # Ensure trailing slash if it's a directory
 # REPOSITORY_SUMMARY.md # Uncomment if it's generated/transient
+checkpoints/
+outputs/
+wandb/
 
 # Temporary files
 *~

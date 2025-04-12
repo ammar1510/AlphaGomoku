@@ -1,0 +1,24 @@
+# @package _global_
+# Default configuration for Pong PPO Training
+
+# PPO Hyperparameters
+learning_rate: 2.5e-4
+clip_ratio: 0.1
+value_coef: 0.5
+entropy_coef: 0.01
+max_grad_norm: 0.5
+gamma: 0.99
+gae_lambda: 0.95
+update_epochs: 4
+seed: 42
+batch_size: 1 # Batch size for mini-batch updates (env B is handled separately)
+
+# Training settings
+total_timesteps: 1000000 # Target total environment steps
+log_interval: 10 # Log metrics every N training updates (episodes in this case)
+save_interval: 100 # Save model checkpoint every N updates
+model_save_path: "checkpoints/pong_ppo_model.msgpack" # Base path for saving models (in a checkpoints folder)
+use_wandb: True # Whether to use Weights & Biases for logging
+
+# Model settings
+model_activation: "tanh" # Activation function for the MLP layers in the model 

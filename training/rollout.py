@@ -3,7 +3,8 @@ import jax.numpy as jnp
 from jax import lax, jit
 from functools import partial
 
-from env.gomoku import get_action_mask, reset_env, step_env
+from env.pong import get_action_mask, reset_env, step_env
+from models.pong_actor_critic import PongActorCritic
 
 
 def _initialize_trajectory_buffers(env_state, max_steps):
@@ -228,7 +229,8 @@ def calculate_returns(rewards, gamma):
 @jax.jit
 def calculate_gae(rewards, values, dones, gamma=0.99, gae_lambda=0.95):
     """
-    Compute Generalized Advantage Estimation (GAE).
+    Compute Generalized Advantage Estimation (GAE) using scan.
+    Assumes trajectories always contain the terminal state if reached.
 
     Args:
         rewards: Rewards array, shape (steps, batch)
@@ -240,22 +242,132 @@ def calculate_gae(rewards, values, dones, gamma=0.99, gae_lambda=0.95):
     Returns:
         advantages: array of shape (steps, batch)
     """
+    T = rewards.shape[0] # Number of steps
 
-    def gae_single(rewards, values, dones, gamma, gae_lambda):
-        def scan_fn(carry, step_data):
-            next_advantage, next_value = carry
-            reward, value, done = step_data
-            delta = reward + gamma * next_value * (1 - done) - value
-            advantage = delta + gamma * gae_lambda * next_advantage * (1 - done)
+    # Append a zero value and a non-done flag for the step *after* the last one.
+    # This simplifies the scan logic as V(s_{T+1}) is handled implicitly.
+    # If dones[T-1] is True, the mask in the scan will handle it.
+    values_with_last = jnp.concatenate([values, jnp.zeros_like(values[0:1])], axis=0)
 
-            return (advantage, value), advantage
+    def gae_scan_fn(carry, step_data):
+        """
+        Processes a single step in the reverse GAE calculation using lax.scan.
+        Operates on data corresponding to a single time step t across the batch.
 
-        step_data = (rewards, values, dones)
+        Args:
+            carry: GAE value from the next step (A_{t+1}) for the batch, shape (B,).
+            step_data: Tuple (reward_t, value_t, done_t, next_value_t) for the batch at step t.
+              - reward_t: Rewards at step t, shape (B,).
+              - value_t: Value estimates V(s_t), shape (B,).
+              - done_t: Done flags at step t, shape (B,).
+              - next_value_t: Value estimates V(s_{t+1}), shape (B,).
 
-        _, advantages = jax.lax.scan(scan_fn, (0.0, 0.0), step_data, reverse=True)
-        return advantages
+        Returns:
+            Tuple (new_carry, output_element), where both are the calculated
+            GAE for the current step t (A_t) for the batch, shape (B,).
+        """
+        gae = carry
+        reward, value, done, next_value = step_data # next_value = V(s_{t+1})
 
-    advantages = jax.vmap(gae_single, in_axes=(1, 1, 1, None, None), out_axes=1)(
-        rewards, values, dones, gamma, gae_lambda
-    )
+        mask = 1.0 - done # Mask based on current step's done flag
+        delta = reward + gamma * next_value * mask - value
+        gae = delta + gamma * gae_lambda * gae * mask # Use mask here
+        return gae, gae
+
+    # Prepare data for scan: (reward_t, value_t, done_t, value_{t+1})
+    # We iterate T steps, needing T next_values (values_with_last[1:])
+    scan_data = (rewards, values, dones, values_with_last[1:])
+
+    # Initialize carry (gae) to 0.0 for the step after the last actual step.
+    # Scan backwards from T-1 down to 0.
+    # The carry needs to match the batch dimension shape.
+    initial_carry = jnp.zeros(rewards.shape[1]) # Shape (B,)
+    _, advantages = jax.lax.scan(gae_scan_fn, initial_carry, scan_data, reverse=True)
+
     return advantages
+
+
+# @jax.jit # REMOVED this decorator
+def run_pong_episode(env_state, actor_critic, params, rng):
+    """
+    Collect a trajectory from a single agent interacting with the Pong env.
+
+    Args:
+        env_state: Dictionary containing the environment state (Pong env wrapper).
+        actor_critic: ActorCritic model (PongActorCritic).
+        params: Model parameters.
+        rng: JAX random key.
+
+    Returns:
+        trajectory: Dictionary with collected data (obs, actions, rewards, dones, values, log_probs).
+        final_env_state: The environment state after the episode concludes.
+        rng: Updated random key.
+    """
+    B = env_state["B"]
+    rng, reset_rng = jax.random.split(rng)
+    env_state, initial_obs = reset_env(env_state, new_rng=reset_rng)
+
+
+    observations_list = []
+    actions_list = []
+    rewards_list = []
+    dones_list = []
+    values_list = []
+    log_probs_list = []
+
+    # Initial state for the loop - remove buffer references
+    loop_state = {
+        "env_state": env_state,
+        "current_obs": initial_obs,
+        "rng": rng,
+        "done_flag": jnp.zeros((B,), dtype=jnp.bool_), # Track if BATCH is done
+    }
+
+    # --- Python while loop (condition simplified) --- #
+    while not jnp.all(loop_state["done_flag"]):
+        rng, action_rng = jax.random.split(loop_state["rng"])
+        current_obs = loop_state["current_obs"]
+
+        pi, value = actor_critic.apply({'params': params}, current_obs)
+        action = pi.sample(seed=action_rng)
+        log_prob = pi.log_prob(action)
+
+        # Step environment
+        new_env_state, next_obs, reward, done = step_env(loop_state["env_state"], action)
+
+        # Append current step data to lists
+        observations_list.append(current_obs)
+        actions_list.append(action)
+        rewards_list.append(reward)
+        dones_list.append(done)
+        values_list.append(value)
+        log_probs_list.append(log_prob)
+
+        # Update loop state for next iteration
+        loop_state["env_state"] = new_env_state
+        loop_state["current_obs"] = next_obs
+        loop_state["rng"] = rng
+        loop_state["done_flag"] = done # Update done flag for next iteration check
+
+    # --- End Python while loop ---
+
+    # Use the final state from the loop
+    final_loop_state = loop_state
+    trajectory_length = len(rewards_list)
+
+    # Convert lists to JAX arrays
+    # Note: Stacking adds a leading dimension (time)
+    trajectory = {
+        "obs": jnp.stack(observations_list, axis=0), # (T, B, 128)
+        "actions": jnp.stack(actions_list, axis=0), # (T, B, 2)
+        "rewards": jnp.stack(rewards_list, axis=0), # (T, B)
+        "dones": jnp.stack(dones_list, axis=0), # (T, B)
+        "values": jnp.stack(values_list, axis=0), # (T, B)
+        "log_probs": jnp.stack(log_probs_list, axis=0), # (T, B)
+        "T": jnp.array(trajectory_length) # Store trajectory length
+    }
+
+    # Trim trajectory to actual length T - NO LONGER NEEDED
+    # trajectory = jax.tree_map(lambda x: x[:trajectory["T"]], trajectory)
+
+    return trajectory, final_loop_state["env_state"], final_loop_state["rng"]
