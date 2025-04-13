@@ -82,6 +82,8 @@ alphagomoku.egg-info/ # Ensure trailing slash if it's a directory
 checkpoints/
 outputs/
 wandb/
+pong_ppo_checkpoints/
+logs/
 
 # Temporary files
 *~

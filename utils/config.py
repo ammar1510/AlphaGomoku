@@ -4,9 +4,13 @@ import random
 import glob
 import time
 import sys
+import re
 from flax import serialization
+from flax.serialization import msgpack_restore
 import yaml
+import jax
 import jax.random as jr
+from typing import List, Optional, Any
 
 
 def load_config(config_path="cfg/train.yaml") -> dict:
@@ -124,33 +128,68 @@ def get_checkpoint_filename(checkpoint_dir) -> str:
     return os.path.join(checkpoint_dir, filename)
 
 
-def list_checkpoints(checkpoint_dir) -> list[str]:
+def list_checkpoints(checkpoint_dir: str, pattern_type: str = "timestamp_pkl") -> List[str]:
     """
-    List all available checkpoints.
+    List all available checkpoints, sorted newest first.
 
     Args:
-        checkpoint_dir: Directory for checkpoints.
+        checkpoint_dir: Directory containing checkpoints.
+        pattern_type: The type of checkpoint naming convention.
+                      "timestamp_pkl": Matches model_TIMESTAMP.pkl (sorted by timestamp).
+                      "update_msgpack": Uses regex to find BASE_update_NUMBER.msgpack
+                                        (sorted by update number).
+                                        Requires base_path to infer BASE and extension.
+        base_path: The base model save path (e.g., path/to/model.msgpack). Only needed
+                   if pattern_type is "update_msgpack".
 
     Returns:
-        list: List of checkpoint filenames sorted by timestamp (newest first).
+        List[str]: List of checkpoint filenames sorted newest first.
+                  Returns empty list if directory doesn't exist or no files match.
     """
-    pattern = os.path.join(checkpoint_dir, "model_*.pkl")
-    checkpoints = glob.glob(pattern)
+    if not os.path.isdir(checkpoint_dir):
+        logging.warning(f"Checkpoint directory not found: {checkpoint_dir}")
+        return []
 
-    # Sort by timestamp (extract from filename)
-    def get_timestamp(filepath):
-        filename = os.path.basename(filepath)
-        # Extract timestamp which is the numeric part after "model_"
-        parts = filename.split("_")
-        if len(parts) >= 2:
-            try:
-                return int(parts[1].split(".")[0])
-            except ValueError:
-                return 0
-        return 0
+    checkpoints = []
 
-    # Sort newest first
-    checkpoints.sort(key=get_timestamp, reverse=True)
+    if pattern_type == "timestamp_pkl":
+        pattern = os.path.join(checkpoint_dir, "model_*.pkl")
+        found_files = glob.glob(pattern)
+
+        def get_timestamp(filepath):
+            filename = os.path.basename(filepath)
+            parts = filename.split("_")
+            if len(parts) >= 2:
+                try:
+                    return int(parts[1].split(".")[0])
+                except ValueError:
+                    return 0
+            return 0
+
+        checkpoints = sorted(found_files, key=get_timestamp, reverse=True)
+
+    elif pattern_type == "update_msgpack":
+        # Infer base and ext from the directory, assuming files exist
+        # This part needs refinement if base_path isn't implicitly known
+        # Let's assume a common pattern if not specified, or require base_path
+        # For now, let's just look for *any* _update_NUM.msgpack
+        # A better implementation would pass the base_path explicitly.
+        file_pattern = re.compile(r"^(.*?)_update_(\d+)(\.msgpack)$")
+        found_files_with_updates = []
+        for filename in os.listdir(checkpoint_dir):
+            match = file_pattern.match(filename)
+            if match:
+                update_count = int(match.group(2))
+                full_path = os.path.join(checkpoint_dir, filename)
+                found_files_with_updates.append((full_path, update_count))
+
+        # Sort by update count, highest first
+        found_files_with_updates.sort(key=lambda item: item[1], reverse=True)
+        checkpoints = [item[0] for item in found_files_with_updates]
+
+    else:
+        logging.error(f"Unknown pattern_type for list_checkpoints: {pattern_type}")
+        return []
 
     return checkpoints
 
@@ -229,33 +268,48 @@ def save_checkpoint(params, checkpoint_dir):
     manage_checkpoint_pool(checkpoint_dir, max_checkpoints=10)
 
 
-def load_checkpoint(checkpoint_path):
+def load_checkpoint(checkpoint_path: str, load_format: str = "pkl") -> Optional[Any]:
     """
-    Load network checkpoint.
-    Only loads model parameters, not optimizer state.
+    Load network parameters from a checkpoint file.
 
     Args:
-      checkpoint_path: File path for checkpoint.
+        checkpoint_path: File path for the checkpoint.
+        load_format: The format of the checkpoint ('pkl' or 'msgpack').
 
     Returns:
-      A tuple (params, None) if the checkpoint exists,
-      or (None, None) if not. The second element is always None
-      since we no longer store optimizer state.
+        The loaded parameters (or checkpoint dictionary for 'pkl') if successful,
+        otherwise None.
     """
+    if not os.path.exists(checkpoint_path):
+        logging.warning(f"Checkpoint file not found at {checkpoint_path}.")
+        return None
+
     try:
         with open(checkpoint_path, "rb") as f:
             data = f.read()
 
-        # Create template with only params field
-        template = {"params": None}
-        checkpoint = serialization.from_bytes(template, data)
+        if load_format == "pkl":
+            # Original Flax serialization format
+            template = {"params": None} # Assumes structure
+            checkpoint = serialization.from_bytes(template, data)
+            logging.info(f"Loaded PKL checkpoint from {checkpoint_path}")
+            return checkpoint["params"] # Return only params
 
-        logging.info(f"Model checkpoint loaded from {checkpoint_path}")
-        assert checkpoint["params"] is not None
+        elif load_format == "msgpack":
+            # msgpack format used in Pong training
+            loaded_data = msgpack_restore(data)
+            logging.info(f"Loaded msgpack checkpoint from {checkpoint_path}")
+            return loaded_data # Return the raw restored data
+        else:
+             logging.error(f"Unknown load_format: {load_format}")
+             return None
 
-        return checkpoint["params"]
     except FileNotFoundError:
-        logging.warning(f"Model checkpoint not found at {checkpoint_path}.")
+        # This case is already handled by the initial check, but good practice
+        logging.warning(f"Checkpoint file not found during loading: {checkpoint_path}.")
+        return None
+    except Exception as e:
+        logging.error(f"Failed to load checkpoint from {checkpoint_path}: {e}")
         return None
 
 

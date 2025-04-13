@@ -14,11 +14,13 @@ seed: 42
 batch_size: 1 # Batch size for mini-batch updates (env B is handled separately)
 
 # Training settings
-total_timesteps: 1000000 # Target total environment steps
+total_timesteps: 10000000 # Target total environment steps
 log_interval: 10 # Log metrics every N training updates (episodes in this case)
-save_interval: 100 # Save model checkpoint every N updates
-model_save_path: "checkpoints/pong_ppo_model.msgpack" # Base path for saving models (in a checkpoints folder)
-use_wandb: True # Whether to use Weights & Biases for logging
+checkpoint_dir: "pong_ppo_checkpoints" # Directory for Orbax checkpoints
+save_interval_updates: 100 # Save checkpoint every N training updates
+
+# Orbax settings
+orbax_max_to_keep: 5 # Number of checkpoints to keep
 
 # Model settings
 model_activation: "tanh" # Activation function for the MLP layers in the model 

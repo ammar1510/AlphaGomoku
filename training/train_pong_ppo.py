@@ -1,33 +1,35 @@
 import jax
 import jax.numpy as jnp
 import optax
-import tqdm # For progress bar
-import logging # For logging
+import tqdm 
+import logging 
 import time
-import os # For path manipulation
+import os 
 from dataclasses import dataclass, field
 import hydra
 from omegaconf import DictConfig, OmegaConf
-from flax.serialization import msgpack_serialize, msgpack_restore # Import for saving/loading
+from flax.training import train_state as flax_train_state # For Orbax compatibility
+import orbax.checkpoint as ocp # Orbax import
+import wandb 
 
 from env.pong import init_env, NUM_ACTIONS, OBSERVATION_SHAPE
 from models.pong_actor_critic import PongActorCritic
 from training.trainer.ppo_trainer import PPOTrainer, PPOConfig
-# Assume wandb logging is desired
-try:
-    import wandb
-    WANDB_AVAILABLE = True
-except ImportError:
-    WANDB_AVAILABLE = False
-    wandb = None
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Default PPO configuration using OmegaConf for structure and potential overrides
+class TrainState(flax_train_state.TrainState):
+    # Inherits apply_fn, params, tx, opt_state
+    # Add any other state components you want to checkpoint
+    rng: jax.Array
+    global_step: int
+    update_count: int
+
+
 @dataclass
 class TrainConfig:
-    # PPO Hyperparameters (matching PPOConfig)
+    # PPO Hyperparameters
     learning_rate: float = 2.5e-4
     clip_ratio: float = 0.1
     value_coef: float = 0.5
@@ -38,187 +40,225 @@ class TrainConfig:
     update_epochs: int = 4
     seed: int = 42
     batch_size: int = 1 # Pong env currently supports B=1
-    # num_steps: int = 128 # REMOVED: Not used as rollout runs full episodes
 
-    # Training settings
     total_timesteps: int = 1_000_000
-    log_interval: int = 10 # Log metrics every N training steps
-    save_interval: int = 100 # Save model checkpoint every N updates
-    model_save_path: str = "pong_ppo_model.msgpack" # Base path for saving models
-    use_wandb: bool = True
-
-    # Model settings
+    log_interval: int = 10
+    save_interval_updates: int = 100 
+    checkpoint_dir: str = "pong_ppo_checkpoints" 
     model_activation: str = "tanh"
 
-    # Create PPOConfig from TrainConfig
-    def get_ppo_config(self) -> PPOConfig:
-        return PPOConfig(
-            learning_rate=self.learning_rate,
-            clip_ratio=self.clip_ratio,
-            value_coef=self.value_coef,
-            entropy_coef=self.entropy_coef,
-            max_grad_norm=self.max_grad_norm,
-            gamma=self.gamma,
-            gae_lambda=self.gae_lambda,
-            update_epochs=self.update_epochs,
-            seed=self.seed,
-            batch_size=self.batch_size,
-            # num_steps=self.num_steps, # REMOVED
-        )
+    # Orbax settings
+    orbax_max_to_keep: int = 3 # Keep latest 3 checkpoints
 
-# Using Hydra for configuration management
+
+
 @hydra.main(version_base=None, config_path="../cfg", config_name="pong_ppo_config") # Corrected path
 def main(cfg: DictConfig):
-    # Use original DictConfig (cfg) for direct access where possible
     logger.info(f"Starting Pong PPO training with config:\n{OmegaConf.to_yaml(cfg)}")
 
     # --- Assert CPU Backend --- #
     default_backend = jax.default_backend()
     assert default_backend == 'cpu', f"Expected JAX backend to be 'cpu', but found '{default_backend}'. Pong environment interactions may not be suitable for other backends."
     logger.info(f"Using JAX backend: {default_backend}")
-    # --- End Assertion --- #
 
-    # Convert DictConfig to a standard Python dict
-    cfg_dict = OmegaConf.to_container(cfg, resolve=True)
-    # Instantiate TrainConfig dataclass from the dictionary
-    try:
-        train_cfg = TrainConfig(**cfg_dict)
-    except TypeError as e:
-        logger.error(f"Failed to instantiate TrainConfig from config: {e}")
-        logger.error(f"Config Dictionary: {cfg_dict}")
-        raise e
-
-    # Seeding - Use train_cfg now as it's a proper instance
+    # --- Config and RNG Setup ---
+    cfg_obj = OmegaConf.to_object(cfg)
+    train_cfg = TrainConfig(**cfg_obj) # Instantiate the dataclass
     key = jax.random.PRNGKey(train_cfg.seed)
-    model_key, trainer_key = jax.random.split(key)
+    model_key, trainer_key, state_rng_key = jax.random.split(key, 3)
 
-    # Initialize Logging (WandB) - Use train_cfg
-    if train_cfg.use_wandb and WANDB_AVAILABLE:
-        wandb.init(
-            project="alphagomoku-pong-ppo", # Example project name
-            config=cfg_dict, # Log the original dict representation
-            sync_tensorboard=False,
-            monitor_gym=False, # We are using our own env wrapper
-            save_code=True,
-        )
-        logger.info("Weights & Biases initialized.")
-    elif train_cfg.use_wandb:
-        logger.warning("WandB requested but not installed. Skipping WandB logging.")
-        train_cfg.use_wandb = False # Modify the dataclass instance if needed
+    # --- Wandb Initialization ---
+    wandb.init(
+        project="alphagomoku-pong-ppo",
+        config=cfg_obj, # Log the original DictConfig
+        sync_tensorboard=False,
+        monitor_gym=False,
+        save_code=True,
+    )
+    logger.info("Weights & Biases initialized.")
 
-    # Initialize Model - Use train_cfg
+
+    # --- Model Initialization ---
     actor_critic = PongActorCritic(action_dim=NUM_ACTIONS, activation=train_cfg.model_activation)
-    # Dummy observation for initialization
     dummy_obs = jnp.zeros((1,) + OBSERVATION_SHAPE, dtype=jnp.uint8)
-    params = actor_critic.init(model_key, dummy_obs)["params"]
+    initial_variables = actor_critic.init(model_key, dummy_obs)
     logger.info("Pong Actor-Critic model initialized.")
 
-    # Initialize Trainer - Needs train_cfg for get_ppo_config
-    ppo_config = train_cfg.get_ppo_config()
+
+    # --- Optimizer Initialization ---
+    # Create PPOConfig from TrainConfig for the trainer
+    ppo_config = PPOConfig(
+        learning_rate=train_cfg.learning_rate,
+        clip_ratio=train_cfg.clip_ratio,
+        value_coef=train_cfg.value_coef,
+        entropy_coef=train_cfg.entropy_coef,
+        max_grad_norm=train_cfg.max_grad_norm,
+        gamma=train_cfg.gamma,
+        gae_lambda=train_cfg.gae_lambda,
+        update_epochs=train_cfg.update_epochs,
+        seed=train_cfg.seed, # Pass seed to trainer if it needs it internally
+        batch_size=train_cfg.batch_size,
+    )
+    # The optimizer is now part of the PPOTrainer
     trainer = PPOTrainer(actor_critic, ppo_config)
-    opt_state = trainer.optimizer.init(params)
-    logger.info("PPO Trainer initialized.")
+    # Initialize optimizer state using trainer's optimizer and initial model params
+    initial_opt_state = trainer.optimizer.init(initial_variables['params'])
+    logger.info("Optimizer initialized.")
 
-    # Training Loop - Loop based on global_step
-    logger.info(f"Starting training loop for {train_cfg.total_timesteps} timesteps...")
+    # --- Orbax Checkpoint Manager Setup ---
+    mngr_options = ocp.CheckpointManagerOptions(
+        max_to_keep=train_cfg.orbax_max_to_keep,
+        create=True # Create checkpoint dir if it doesn't exist
+    )
+    checkpointer = ocp.StandardCheckpointer() # Or AsyncCheckpointer
+    mngr = ocp.CheckpointManager(
+        directory=os.path.abspath(train_cfg.checkpoint_dir), # Use absolute path
+        checkpointers=checkpointer,
+        options=mngr_options
+    )
+    logger.info(f"Orbax CheckpointManager initialized at {train_cfg.checkpoint_dir}")
+
+
+    # --- Restore Checkpoint or Initialize State ---
+    # Define the structure of the state to be saved/restored
+    initial_train_state = TrainState.create(
+        apply_fn=actor_critic.apply, # Required by flax TrainState
+        params=initial_variables['params'],
+        tx=trainer.optimizer, # Store the optimizer transformation
+        rng=state_rng_key, # Use a dedicated RNG for the state
+        global_step=0,
+        update_count=0
+        # Add other non-static model variables if needed (e.g., batch stats)
+        # variables=initial_variables # If you need the full variable dict (incl. non-params)
+    )
+
+    # Attempt to restore the latest checkpoint
+    latest_step = mngr.latest_step()
+    if latest_step is not None:
+        logger.info(f"Attempting to restore checkpoint from step {latest_step}...")
+        # Restore using the initial_train_state as the target structure
+        restored_state = mngr.restore(
+            latest_step,
+            args=ocp.args.StandardRestore(abstract_ckpt=initial_train_state) # Provide structure
+        )
+        if restored_state:
+            train_state = restored_state
+            # Extract RNG key needed for trainer (if trainer manages its own key)
+            # trainer_key = train_state.rng # Overwrite if rng is part of state
+            logger.info(f"Successfully restored state from step {latest_step} (Global Step: {train_state.global_step}, Update: {train_state.update_count}).")
+        else:
+            logger.warning(f"Failed to restore checkpoint from step {latest_step}. Using initial state.")
+            train_state = initial_train_state
+    else:
+        logger.info("No existing checkpoint found. Starting with initial state.")
+        train_state = initial_train_state
+
+    # --- Training Loop ---
+    logger.info(f"Starting training loop from Global Step: {train_state.global_step}, Update: {train_state.update_count}")
+    logger.info(f"Target total timesteps: {train_cfg.total_timesteps}")
     start_time = time.time()
-    global_step = 0 # Track total environment steps
-    update_count = 0 # Track number of updates (episodes)
-
-    # The trainer holds the env_state internally now
-    # train_state needs params, opt_state, rng
-    train_state = {
-        "params": params,
-        "opt_state": opt_state,
-        "rng": trainer_key,
-        # Env state is managed inside trainer
-    }
 
     # Use TQDM for progress bar based on total_timesteps
-    pbar = tqdm.tqdm(total=train_cfg.total_timesteps, desc="Training Progress")
-    last_global_step = 0
+    # Initial value should reflect the restored global step
+    pbar = tqdm.tqdm(
+        initial=train_state.global_step,
+        total=train_cfg.total_timesteps,
+        desc="Training Progress"
+    )
+    last_logged_global_step = train_state.global_step # Track for SPS calculation
 
-    while global_step < train_cfg.total_timesteps:
-        update_count += 1
+    while train_state.global_step < train_cfg.total_timesteps:
+        current_update_count = train_state.update_count + 1
+
+        # Construct the state dict expected by the trainer (might need adjustment)
+        # Assuming trainer needs 'params' and 'opt_state' directly
+        # And maybe the RNG key if it doesn't manage its own state
+        # trainer_input_state = {
+        #     "variables": {'params': train_state.params}, # Pass only params if that's what train_step expects
+        #     "opt_state": train_state.opt_state,
+        #     "rng": trainer_key # Pass the separate trainer RNG key
+        # }
+
         # Perform one training step (rollout + update)
-        # Call train_step directly without JIT
-        new_params, new_opt_state, metrics, new_rng = trainer.train_step(
-            train_state["params"],
-            train_state["opt_state"],
-            # Pass rng from train_state, trainer updates its internal rng too
+        # PPOTrainer.train_step expects (params, opt_state) and returns (new_params, new_opt_state, metrics, updated_rng)
+        new_params, new_opt_state, metrics, updated_trainer_rng = trainer.train_step(
+            train_state.params,       # Pass params directly
+            train_state.opt_state       # Pass optimizer state
+            # No RNG key needed here, trainer manages its own internal RNG
         )
 
-        # Update train state
-        train_state["params"] = new_params
-        train_state["opt_state"] = new_opt_state
-        train_state["rng"] = new_rng # Trainer now returns the updated key
+        # Update the trainer's RNG key for the next step
+        trainer_key = updated_trainer_rng
 
-        current_step_count = metrics["episode_length"]
-        previous_global_step = global_step
-        global_step += current_step_count.item() # .item() to get scalar from JAX array
+        # Calculate steps taken in this update
+        steps_this_update = metrics["episode_length"].item() # .item() to get scalar
+
+        # Update the main TrainState
+        train_state = train_state.replace(
+            params=new_params, # Update params directly from train_step output
+            opt_state=new_opt_state,
+            # rng=new_rng, # Don't update state's RNG here, trainer manages its own
+            global_step=train_state.global_step + steps_this_update,
+            update_count=current_update_count
+        )
 
         # Update progress bar
-        pbar.update(global_step - last_global_step)
-        last_global_step = global_step
+        pbar.update(steps_this_update)
         pbar.set_postfix({"Return": f"{metrics['episode_return'].item():.2f}"})
 
-        # Logging - Use train_cfg
-        # Log based on update_count or time interval if desired, here using log_interval based on updates
-        if update_count % train_cfg.log_interval == 0:
+        # --- Logging ---
+        if current_update_count % train_cfg.log_interval == 0:
             end_time = time.time()
-            steps_per_second = (global_step - previous_global_step) / (end_time - start_time) # SPS for last interval
+            elapsed_time = end_time - start_time
+            # Calculate SPS based on steps since last log
+            steps_since_last_log = train_state.global_step - last_logged_global_step
+            sps = steps_since_last_log / elapsed_time if elapsed_time > 0 else 0
             start_time = end_time # Reset timer for next interval
+            last_logged_global_step = train_state.global_step # Update last logged step
 
             log_data = {
-                "update": update_count,
-                "global_step": global_step,
-                "sps": steps_per_second,
+                "update": current_update_count,
+                "global_step": train_state.global_step,
+                "sps": sps,
                 **{k: v.item() for k, v in metrics.items()} # Convert JAX arrays to scalars
             }
-            logger.info(f"Update: {update_count}, Global Step: {global_step}, SPS: {steps_per_second:.2f}, Return: {metrics['episode_return']:.2f}")
-            if train_cfg.use_wandb and WANDB_AVAILABLE:
-                wandb.log(log_data, step=global_step)
+            logger.info(
+                f"Update: {current_update_count}, Global Step: {train_state.global_step}, "
+                f"SPS: {sps:.2f}, Return: {metrics['episode_return']:.2f}"
+            )
+            wandb.log(log_data, step=train_state.global_step)
 
-        # --- Model Saving Logic --- Use train_cfg
-        # Save based on update_count
-        if update_count % train_cfg.save_interval == 0:
-            # Create a directory for checkpoints if it doesn't exist
-            checkpoint_dir = os.path.dirname(train_cfg.model_save_path)
-            if checkpoint_dir and not os.path.exists(checkpoint_dir):
-                os.makedirs(checkpoint_dir, exist_ok=True)
-                logger.info(f"Created checkpoint directory: {checkpoint_dir}")
+        # --- Orbax Model Saving ---
+        if current_update_count % train_cfg.save_interval_updates == 0:
+            logger.info(f"Saving checkpoint for update {current_update_count} (Global Step: {train_state.global_step})")
+            # Save the entire TrainState object
+            save_args = ocp.args.StandardSave(train_state)
+            mngr.save(
+                step=train_state.global_step, # Use global_step for checkpoint naming
+                args=save_args,
+                force=True # Overwrite if a checkpoint for this step exists (optional)
+            )
+            # Optionally wait for save to complete if using AsyncCheckpointer
+            # mngr.wait_until_finished()
+            logger.info(f"Checkpoint saved successfully at step {train_state.global_step}.")
 
-            # Construct checkpoint path (use update_count)
-            base, ext = os.path.splitext(train_cfg.model_save_path)
-            checkpoint_path = f"{base}_update_{update_count}{ext}"
-
-            # Save parameters
-            try:
-                with open(checkpoint_path, "wb") as f:
-                    f.write(msgpack_serialize(train_state["params"]))
-                logger.info(f"Saved model checkpoint at update {update_count} to {checkpoint_path}")
-            except Exception as e:
-                 logger.error(f"Failed to save checkpoint at update {update_count}: {e}")
-        # --- End Model Saving Logic ---
 
     pbar.close() # Close the progress bar
     logger.info("Training finished.")
 
-    # Save final model - Use train_cfg
-    # Ensure directory exists
-    final_save_dir = os.path.dirname(train_cfg.model_save_path)
-    if final_save_dir and not os.path.exists(final_save_dir):
-        os.makedirs(final_save_dir, exist_ok=True)
+    # --- Final Orbax Save ---
+    logger.info(f"Saving final model state at Global Step: {train_state.global_step}")
+    save_args = ocp.args.StandardSave(train_state)
+    mngr.save(
+        step=train_state.global_step,
+        args=save_args,
+        force=True # Overwrite potentially existing checkpoint at this step
+    )
+    mngr.wait_until_finished() # Wait for the final save to complete
+    logger.info(f"Final model state saved successfully to {mngr.directory}/.")
 
-    try:
-        with open(train_cfg.model_save_path, "wb") as f:
-            f.write(msgpack_serialize(train_state["params"]))
-        logger.info(f"Final model parameters saved to {train_cfg.model_save_path}")
-    except Exception as e:
-        logger.error(f"Failed to save final model: {e}")
 
-    if train_cfg.use_wandb and WANDB_AVAILABLE:
-        wandb.finish()
+    wandb.finish()
 
 if __name__ == "__main__":
     main() 

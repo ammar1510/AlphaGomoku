@@ -53,8 +53,7 @@ class PPOTrainer:
         self.gamma = config.gamma
         self.gae_lambda = config.gae_lambda
         self.update_epochs = config.update_epochs
-        self.batch_size = config.batch_size # For env vectorization (though Pong wrapper currently supports B=1)
-        # self.num_steps = config.num_steps # REMOVED
+        self.batch_size = config.batch_size 
 
         self.optimizer = optax.chain(
             optax.clip_by_global_norm(config.max_grad_norm),
@@ -63,7 +62,6 @@ class PPOTrainer:
 
         self.rng = jax.random.PRNGKey(config.seed)
 
-        # Initialize environment state
         env_rng, self.rng = jax.random.split(self.rng)
         # NOTE: Pong env currently only supports B=1. Adapt if needed.
         self.env_state = init_env(B=1, rng=env_rng)
@@ -81,22 +79,18 @@ class PPOTrainer:
         Returns:
             dict: Processed batch data including returns and advantages.
         """
-        # GAE Calculation uses the collected values. last_value is not needed.
         rewards = trajectory["rewards"]
-        values = trajectory["values"] # Values estimated during rollout
-        dones = trajectory["dones"] # Done flags for each step
+        values = trajectory["values"] 
+        dones = trajectory["dones"] 
 
         advantages = calculate_gae(rewards, values, dones, self.gamma, self.gae_lambda)
-        returns = advantages + values # N.B. Values here are V(s_t) from rollout
+        returns = advantages + values 
 
-        # Reshape for training: Flatten T and B dimensions
-        # Ensure trajectory doesn't contain 'last_obs' anymore
         batch = {k: v.reshape(-1, *v.shape[2:]) for k, v in trajectory.items() if k != "T"}
 
         batch["returns"] = returns.reshape(-1)
         batch["advantages"] = advantages.reshape(-1)
 
-        # Normalize advantages
         batch["advantages"] = (batch["advantages"] - jnp.mean(batch["advantages"])) / (
             jnp.std(batch["advantages"]) + 1e-8
         )
@@ -116,8 +110,6 @@ class PPOTrainer:
 
         def loss_fn(params: Any) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
             """Calculates the PPO loss and associated metrics."""
-            # Use the single agent's actor_critic model
-            # Call evaluate_actions via apply, passing the params
             new_log_probs, entropy, values = self.actor_critic.apply(
                 {'params': params},
                 batch["obs"],
@@ -177,7 +169,7 @@ class PPOTrainer:
         self,
         params: Any,
         optimizer_state: optax.OptState,
-    ) -> Tuple[Any, optax.OptState, Dict[str, jnp.ndarray], Any]: # Return updated env_state
+    ) -> Tuple[Any, optax.OptState, Dict[str, jnp.ndarray], Any]:
         """
         Performs a single training step including rollout and update.
 
@@ -188,26 +180,20 @@ class PPOTrainer:
         Returns:
             tuple: (updated_params, updated_opt_state, metrics, updated_env_state, updated_rng)
         """
-        # Generate trajectory using the Pong-specific rollout
         rollout_rng, self.rng = jax.random.split(self.rng)
-        trajectory, final_env_state, _ = run_pong_episode(
+        trajectory, final_env_state = run_pong_episode(
             self.env_state, self.actor_critic, params, rollout_rng
         )
-
-        # Update env_state for the next step
         self.env_state = final_env_state
 
-        # Prepare batch - No longer needs params
         batch = self.prepare_batch(trajectory)
 
-        # Update agent
         new_params, new_opt_state, metrics = self.update(
             params,
             batch,
             optimizer_state,
         )
 
-        # Add episode return/length to metrics if available
         metrics["episode_return"] = trajectory["rewards"].sum()
         metrics["episode_length"] = trajectory["T"]
 

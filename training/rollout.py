@@ -287,7 +287,6 @@ def calculate_gae(rewards, values, dones, gamma=0.99, gae_lambda=0.95):
     return advantages
 
 
-# @jax.jit # REMOVED this decorator
 def run_pong_episode(env_state, actor_critic, params, rng):
     """
     Collect a trajectory from a single agent interacting with the Pong env.
@@ -320,11 +319,11 @@ def run_pong_episode(env_state, actor_critic, params, rng):
         "env_state": env_state,
         "current_obs": initial_obs,
         "rng": rng,
-        "done_flag": jnp.zeros((B,), dtype=jnp.bool_), # Track if BATCH is done
+        "done": jnp.zeros((B,), dtype=jnp.bool_), # Track if BATCH is done
     }
 
     # --- Python while loop (condition simplified) --- #
-    while not jnp.all(loop_state["done_flag"]):
+    while not jnp.all(loop_state["done"]):
         rng, action_rng = jax.random.split(loop_state["rng"])
         current_obs = loop_state["current_obs"]
 
@@ -343,20 +342,16 @@ def run_pong_episode(env_state, actor_critic, params, rng):
         values_list.append(value)
         log_probs_list.append(log_prob)
 
-        # Update loop state for next iteration
         loop_state["env_state"] = new_env_state
         loop_state["current_obs"] = next_obs
         loop_state["rng"] = rng
-        loop_state["done_flag"] = done # Update done flag for next iteration check
+        loop_state["done"] = done 
 
-    # --- End Python while loop ---
 
-    # Use the final state from the loop
-    final_loop_state = loop_state
     trajectory_length = len(rewards_list)
 
-    # Convert lists to JAX arrays
-    # Note: Stacking adds a leading dimension (time)
+    final_env_state = loop_state["env_state"]
+
     trajectory = {
         "obs": jnp.stack(observations_list, axis=0), # (T, B, 128)
         "actions": jnp.stack(actions_list, axis=0), # (T, B, 2)
@@ -367,7 +362,5 @@ def run_pong_episode(env_state, actor_critic, params, rng):
         "T": jnp.array(trajectory_length) # Store trajectory length
     }
 
-    # Trim trajectory to actual length T - NO LONGER NEEDED
-    # trajectory = jax.tree_map(lambda x: x[:trajectory["T"]], trajectory)
 
-    return trajectory, final_loop_state["env_state"], final_loop_state["rng"]
+    return trajectory, final_env_state
