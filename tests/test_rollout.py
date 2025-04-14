@@ -429,3 +429,35 @@ def test_calculate_gae_shapes():
     assert returns.dtype == jnp.float32
 
 
+def test_calculate_gae_batch():
+    """Tests calculate_gae with a batch size > 1."""
+    # Based on test_calculate_gae_simple, duplicated for B=2
+    T = 3
+    B = 2
+    # Shape (T, B) = (3, 2)
+    rewards = jnp.array([[1.0, 1.0], [1.0, 1.0], [1.0, 1.0]])
+    dones = jnp.array([[False, False], [False, False], [False, False]])
+    # values need shape (T+1, B) = (4, 2)
+    values = jnp.array([[0.5, 0.5], [0.6, 0.6], [0.7, 0.7], [0.8, 0.8]]) # V(s0), V(s1), V(s2), V(s3)
+    gamma = 0.9
+    gae_lambda = 0.95
+
+    # Expected results are the same as the simple case, just duplicated
+    expected_advantages_single = jnp.array([[2.6662955], [1.9021], [1.02]])
+    expected_advantages = jnp.concatenate([expected_advantages_single] * B, axis=1)
+
+    expected_returns_single = expected_advantages_single + values[:-1, 0:1] # Add V(s0), V(s1), V(s2) for one batch item
+    expected_returns = jnp.concatenate([expected_returns_single] * B, axis=1)
+
+    actual_advantages, actual_returns = calculate_gae(rewards, values, dones, gamma, gae_lambda)
+
+    assert actual_advantages.shape == (T, B)
+    assert actual_returns.shape == (T, B)
+
+    np.testing.assert_allclose(actual_advantages, expected_advantages, rtol=1e-5)
+    np.testing.assert_allclose(actual_returns, expected_returns, rtol=1e-5)
+
+
+# TODO: Add tests for run_selfplay and run_episode if they stabilize
+
+

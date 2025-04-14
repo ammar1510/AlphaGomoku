@@ -262,12 +262,11 @@ def calculate_returns(rewards: jnp.ndarray, dones: jnp.ndarray, gamma: float) ->
 @jax.jit
 def calculate_gae(rewards: jnp.ndarray, values: jnp.ndarray, dones: jnp.ndarray, gamma: float = 0.99, gae_lambda: float = 0.95) -> jnp.ndarray:
     """
-    Compute Generalized Advantage Estimation (GAE).
+    Compute Generalized Advantage Estimation (GAE) using lax.scan directly on batched data.
 
     Args:
         rewards: Rewards array, shape (T, B).
         values: Value estimates, shape (T+1, B). Include value of *terminal* state.
-                Requires values[T] which is the value estimate of the state *after* the last action.
         dones: Done flags, shape (T, B). Dones resulting from the action at step t.
         gamma: Discount factor.
         gae_lambda: GAE lambda parameter.
@@ -277,31 +276,46 @@ def calculate_gae(rewards: jnp.ndarray, values: jnp.ndarray, dones: jnp.ndarray,
         returns: GAE-based returns (advantages + values), shape (T, B).
     """
     T = rewards.shape[0]
-    # Check if values has the extra timestep T
+    B = rewards.shape[1]
     assert values.shape[0] == T + 1, f"Values should have shape ({T+1}, B), but got {values.shape}"
-    advantages = jnp.zeros_like(rewards)
-    gae = jnp.zeros(rewards.shape[1]) # Shape (B,)
+    assert values.shape[1] == B, f"Values batch dimension mismatch: {values.shape[1]} vs {B}"
+    assert dones.shape[0] == T, f"Dones time dimension mismatch: {dones.shape[0]} vs {T}"
+    assert dones.shape[1] == B, f"Dones batch dimension mismatch: {dones.shape[1]} vs {B}"
 
-    # Iterate backwards through time
-    for t in reversed(range(T)):
-        # Get value estimates V(s_t) and V(s_{t+1})
-        value_t = values[t]
-        value_tp1 = values[t+1]
-        # Get reward r_t and done flag d_t
-        reward_t = rewards[t]
-        done_t = dones[t].astype(jnp.float32) # Ensure float for calculation
+    values_t = values[:-1] # V(s_0)...V(s_{T-1}), shape (T, B)
+    values_tp1 = values[1:] # V(s_1)...V(s_T), shape (T, B)
+    dones = dones.astype(jnp.float32) # Ensure float, shape (T, B)
 
-        # Calculate delta: delta_t = r_t + gamma * V(s_{t+1}) * (1 - d_t) - V(s_t)
-        # If done_t is True, the contribution from V(s_{t+1}) is zeroed out.
-        delta = reward_t + gamma * value_tp1 * (1.0 - done_t) - value_t
+    # Calculate deltas: delta_t = r_t + gamma * V(s_{t+1}) * (1 - d_t) - V(s_t)
+    deltas = rewards + gamma * values_tp1 * (1.0 - dones) - values_t # Shape (T, B)
 
-        # Calculate GAE: A_t = delta_t + gamma * lambda * A_{t+1} * (1 - d_t)
-        # If done_t is True, the recursive term is zeroed out.
-        gae = delta + gamma * gae_lambda * (1.0 - done_t) * gae
-        advantages = advantages.at[t].set(gae)
+    def scan_fn(carry_gae_batch, step_data_batch):
+        # carry_gae_batch: shape (B,)
+        # step_data_batch: tuple (delta_batch, done_batch), each shape (B,)
+        delta_batch, done_batch = step_data_batch
+
+        # Calculate GAE for the batch: A_t = delta_t + gamma * lambda * A_{t+1} * (1 - d_t)
+        # All operations are element-wise across the batch dimension.
+        gae_batch = delta_batch + gamma * gae_lambda * (1.0 - done_batch) * carry_gae_batch # Shape (B,)
+
+        # Return the new carry (current GAE) and the value to store (also current GAE)
+        return gae_batch, gae_batch
+
+    # Prepare inputs for scan over time axis (0)
+    # Scan operates on the leading dimension T.
+    scan_inputs = (deltas, dones) # Structure: ((T, B), (T, B))
+
+    # Initial carry state for the scan needs to match the batch dimension
+    initial_carry = jnp.zeros(B) # Shape (B,)
+
+    # Scan over axis 0 (time) in reverse.
+    # Inputs structure ((T, B), (T, B)), step_data_batch will be ((B,), (B,))
+    # Carry has shape (B,). Output ys will have shape (T, B).
+    # lax.scan with reverse=True returns outputs in the original order (0..T-1).
+    _, advantages = lax.scan(scan_fn, initial_carry, scan_inputs, reverse=True)
 
     # Calculate returns: R_t = A_t + V(s_t)
-    returns = advantages + values[:-1] # Use values up to T-1
+    returns = advantages + values_t # Shape (T, B)
 
     return advantages, returns
 
