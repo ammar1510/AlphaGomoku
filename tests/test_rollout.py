@@ -1,424 +1,431 @@
-# tests/test_rollout.py
-"""
-Unit tests for the rollout functions in training.rollout.
-Uses mocked environment and actor-critic models to isolate the rollout logic.
-"""
-
 import pytest
 import jax
 import jax.numpy as jnp
-from flax.core import FrozenDict
+import numpy as np
+from jax.random import PRNGKey
+from typing import Any, NamedTuple, Tuple
 
-# Functions under test
-from training.rollout import (
+# Import the components to test
+from alphagomoku.training.rollout import (
     run_selfplay,
     run_episode,
     calculate_returns,
     calculate_gae,
+    LoopState, # Import if needed for type checking/assertions
 )
+from alphagomoku.environments.gomoku import GomokuJaxEnv, GomokuState
+from alphagomoku.environments.base import JaxEnvBase, EnvState
 
+# --- Constants for Testing ---
+TEST_BOARD_SIZE = 5 # Smaller board for faster tests
+TEST_BATCH_SIZE = 2
+TEST_WIN_LENGTH = 4 # Smaller win length
+# Define a buffer size for tests, should be >= max possible steps for done termination tests
+TEST_BUFFER_SIZE = TEST_BOARD_SIZE * TEST_BOARD_SIZE
 
-# ==============================================================================
-# == Mocks ==
-# ==============================================================================
-# Mock implementations of dependencies (ActorCritic model, Environment functions)
-# to isolate the rollout functions during testing.
-
+# --- Mock Actor-Critic ---
 
 class MockActorCritic:
-    """A simplified mock ActorCritic model for testing rollouts."""
+    """A simple mock actor-critic for testing rollouts."""
+    def __init__(self, env: JaxEnvBase):
+        self.board_size = env.board_size
+        self.action_shape = env.action_shape # (2,)
+        self.num_actions = self.board_size * self.board_size
 
-    def apply(self, params, obs):
-        """Returns fixed dummy logits and value estimates."""
-        B = obs.shape[0]
-        board_size = obs.shape[1]
-        # Simple uniform logits, favoring action (0,0) slightly
-        dummy_logits = jnp.zeros((B, board_size, board_size))
-        dummy_logits = dummy_logits.at[:, 0, 0].set(1.0)
-        dummy_value = jnp.ones(B) * 0.5
-        return dummy_logits, dummy_value
+    def apply(self, params: Any, obs: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """Returns mock logits (uniform) and zero values."""
+        batch_size = obs.shape[0]
+        # Logits shape should match action mask (B, H, W) for Gomoku
+        logits = jnp.zeros((batch_size, self.board_size, self.board_size))
+        value = jnp.zeros(batch_size)
+        return logits, value
 
-    def sample_action(self, logits, rng_key):
-        """Deterministically selects the action with the highest logit."""
-        B = logits.shape[0]
-        board_size = logits.shape[1]
-        flat_logits = logits.reshape(B, -1)
-        flat_action_idx = jnp.argmax(flat_logits, axis=-1)
-        action_row = flat_action_idx // board_size
-        action_col = flat_action_idx % board_size
-        action = jnp.stack([action_row, action_col], axis=-1)
-        return action
+    def sample_action(self, masked_logits: jnp.ndarray, rng: PRNGKey) -> jnp.ndarray:
+        """Samples an action randomly from valid moves."""
+        batch_size = masked_logits.shape[0]
+        flat_logits = masked_logits.reshape(batch_size, -1)
+        # Ensure at least one action is valid if possible, otherwise sample randomly (will be invalid move)
+        # This mock doesn't need sophisticated handling of no-valid-moves case
+        chosen_flat_action = jax.random.categorical(rng, flat_logits)
+        chosen_action_unraveled = jnp.unravel_index(chosen_flat_action, (self.board_size, self.board_size))
+        chosen_action = jnp.stack(chosen_action_unraveled, axis=-1) # Shape (B, 2)
+        return chosen_action.astype(jnp.int32)
 
-    def log_prob(self, logits, action):
-        """Returns a fixed dummy log probability."""
-        # Since sample_action is deterministic argmax, we could calculate
-        # the actual log prob, but for testing rollout structure, a fixed
-        # value is sufficient.
-        B = logits.shape[0]
-        return jnp.zeros(B) - 0.1  # Fixed dummy logprob
+    def log_prob(self, masked_logits: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
+        """Calculates log probability based on uniform random sampling over valid actions."""
+        batch_size = masked_logits.shape[0]
+        action_mask = (masked_logits > -jnp.inf)
+        flat_mask = action_mask.reshape(batch_size, -1)
+        num_valid_actions = flat_mask.sum(axis=-1, keepdims=True)
+        # Avoid division by zero if no actions are valid (e.g., done state)
+        num_valid_actions = jnp.maximum(num_valid_actions, 1)
+        probs = flat_mask / num_valid_actions
 
-    def evaluate_actions(self, params, states, actions):
-        """Returns dummy log probs, entropy, and values for evaluation."""
-        # Needed for PPO trainer tests (though not directly by rollout funcs)
-        T, B = states.shape[0], states.shape[1]
-        action_log_probs = jnp.zeros((T, B)) - 1.0
-        entropy = jnp.ones((T, B)) * 1.5
-        values = jnp.ones((T, B)) * 0.5
-        return action_log_probs, entropy, values
+        # Get log probability for the specific action taken
+        flat_action_idx = action[:, 0] * self.board_size + action[:, 1]
+        log_probs_flat = jnp.log(probs + 1e-9) # Add epsilon for numerical stability
+        chosen_log_probs = jnp.take_along_axis(log_probs_flat, flat_action_idx[:, None], axis=-1).squeeze(-1)
 
-
-def mock_reset_env(env_state):
-    """Mock environment reset function. Returns a zeroed-out observation."""
-    initial_obs = jnp.zeros_like(env_state["boards"], dtype=jnp.float32)
-    env_state["boards"] = jnp.zeros_like(env_state["boards"])
-    env_state["dones"] = jnp.zeros_like(env_state["dones"])
-    env_state["current_player"] = jnp.ones_like(env_state["current_player"])
-    env_state["steps"] = 0
-    return env_state, initial_obs
+        # If no actions were valid initially, log prob should be undefined or very small.
+        # Let's mask it where num_valid_actions was originally 0.
+        return jnp.where(num_valid_actions.squeeze(-1) > 0, chosen_log_probs, -jnp.inf)
 
 
-def mock_step_env(env_state, action):
-    """Mock environment step function. Ends game after fixed steps."""
-    max_mock_steps = 5  # Fixed episode length for mock environment
-    env_state["steps"] += 1
-    # Game ends if max steps reached or already done
-    dones = (env_state["steps"] >= max_mock_steps) | env_state["dones"]
-    # Reward 1.0 only on the step the game transitions to done
-    rewards = jnp.where(dones & ~env_state["dones"], 1.0, 0.0)
-    env_state["dones"] = dones
-    env_state["current_player"] = -env_state["current_player"]  # Flip player
-    # Dummy next observation changes with step number
-    next_obs = (
-        jnp.ones_like(env_state["boards"], dtype=jnp.float32) * env_state["steps"]
+# --- Pytest Fixtures ---
+
+@pytest.fixture
+def env() -> GomokuJaxEnv:
+    """Provides a Gomoku environment instance for testing."""
+    return GomokuJaxEnv(B=TEST_BATCH_SIZE, board_size=TEST_BOARD_SIZE, win_length=TEST_WIN_LENGTH)
+
+@pytest.fixture
+def mock_actor_critic(env: GomokuJaxEnv) -> MockActorCritic:
+    """Provides a mock actor-critic model instance."""
+    return MockActorCritic(env)
+
+@pytest.fixture
+def mock_params() -> Any:
+    """Provides mock parameters (can be anything if model doesn't use them)."""
+    return None # Or {} or any placeholder
+
+@pytest.fixture
+def rng() -> PRNGKey:
+    """Provides a fixed PRNGKey for reproducibility."""
+    return PRNGKey(42)
+
+# --- Test Functions ---
+
+def test_run_selfplay_execution_and_shapes(env, mock_actor_critic, mock_params, rng):
+    """Tests if run_selfplay executes and returns data with expected shapes."""
+    trajectory, final_rng = run_selfplay(env, mock_actor_critic, mock_params, rng, TEST_BUFFER_SIZE)
+
+    assert isinstance(trajectory, dict)
+    assert final_rng is not None
+    assert not jnp.array_equal(rng, final_rng) # RNG should change
+
+    T = trajectory["T"]
+    assert T > 0 and T <= TEST_BUFFER_SIZE
+
+    # Check shapes of the arrays (should match buffer_size)
+    assert trajectory["observations"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE) + env.observation_shape
+    assert trajectory["actions"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE) + env.action_shape
+    assert trajectory["rewards"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE)
+    assert trajectory["dones"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE)
+    assert trajectory["logprobs"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE)
+
+    # Check dtypes
+    assert trajectory["observations"].dtype == jnp.float32
+    assert trajectory["actions"].dtype == jnp.int32
+    assert trajectory["rewards"].dtype == jnp.float32
+    assert trajectory["dones"].dtype == jnp.bool_
+    assert trajectory["logprobs"].dtype == jnp.float32
+
+    # Check that data beyond T is zero (or expected fill value)
+    if T < TEST_BUFFER_SIZE:
+        np.testing.assert_array_equal(trajectory["observations"][T:], jnp.zeros_like(trajectory["observations"][T:]))
+        np.testing.assert_array_equal(trajectory["actions"][T:], jnp.zeros_like(trajectory["actions"][T:]))
+        np.testing.assert_array_equal(trajectory["rewards"][T:], jnp.zeros_like(trajectory["rewards"][T:]))
+        np.testing.assert_array_equal(trajectory["dones"][T:], jnp.zeros_like(trajectory["dones"][T:])) # Buffer is initialized with False
+        np.testing.assert_array_equal(trajectory["logprobs"][T:], jnp.zeros_like(trajectory["logprobs"][T:]))
+
+
+def test_run_selfplay_termination_done(env, mock_actor_critic, mock_params, rng):
+    """Tests if run_selfplay terminates when the environment is done."""
+    # Use a very small win length to force a quick game
+    quick_env = GomokuJaxEnv(B=TEST_BATCH_SIZE, board_size=TEST_BOARD_SIZE, win_length=2)
+    # Create a mock AC for this specific env
+    quick_mock_ac = MockActorCritic(quick_env)
+    # Use a buffer size guaranteed to be large enough
+    buffer_size = quick_env.board_size * quick_env.board_size
+
+    trajectory, _ = run_selfplay(quick_env, quick_mock_ac, mock_params, rng, buffer_size)
+
+    T = trajectory["T"]
+    assert T < buffer_size # Game should finish quickly
+
+    # Check that the last stored done flag corresponds to the step T-1
+    # The trajectory length T means steps 0 to T-1 were executed.
+    # The 'dones' buffer stores the done flag *after* the step.
+    # So, dones[T-1] should contain the terminal state for at least one env.
+    last_dones = trajectory["dones"][T - 1]
+    assert jnp.any(last_dones) # At least one game should be done at step T-1
+
+    # Check if all are done if T < buffer_size (while loop condition)
+    # If T < buffer_size, it implies the loop terminated because jnp.all(dones) was true.
+    if T < buffer_size:
+         assert jnp.all(last_dones)
+
+
+# No max_steps termination test needed as loop primarily terminates on done.
+# The buffer size check is just a safety measure.
+
+def test_run_selfplay_rng_update(env, mock_actor_critic, mock_params, rng):
+    """Tests if the PRNGKey is updated after run_selfplay."""
+    _, final_rng = run_selfplay(env, mock_actor_critic, mock_params, rng, TEST_BUFFER_SIZE)
+    assert not jnp.array_equal(rng, final_rng)
+
+    # Optional: run again and check RNG is different again
+    _, final_rng_2 = run_selfplay(env, mock_actor_critic, mock_params, final_rng, TEST_BUFFER_SIZE)
+    assert not jnp.array_equal(final_rng, final_rng_2)
+
+
+def test_run_episode_execution_and_shapes(env, mock_actor_critic, mock_params, rng):
+    """Tests if run_episode executes and returns data with expected shapes for both players."""
+    # Use the same mock AC and params for black and white for simplicity
+    full_trajectory, final_rng = run_episode(
+        env, mock_actor_critic, mock_params, mock_actor_critic, mock_params, rng, TEST_BUFFER_SIZE
     )
-    return env_state, next_obs, rewards, dones
 
+    assert isinstance(full_trajectory, dict)
+    total_steps = full_trajectory["T"]
+    assert isinstance(total_steps, int) or isinstance(total_steps, jnp.ndarray) # Check type here
+    assert final_rng is not None
+    assert not jnp.array_equal(rng, final_rng) # RNG should change
+    assert total_steps > 0 and total_steps <= TEST_BUFFER_SIZE
 
-def mock_get_action_mask(env_state):
-    """Mock action mask function. Allows all actions."""
-    return jnp.ones_like(env_state["boards"], dtype=jnp.bool_)
+    # Check shapes of the full buffers first
+    assert full_trajectory["observations"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE) + env.observation_shape
+    assert full_trajectory["actions"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE) + env.action_shape
+    assert full_trajectory["rewards"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE)
+    assert full_trajectory["dones"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE)
+    assert full_trajectory["logprobs"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE)
+    assert "T" in full_trajectory # Check T key exists
 
+    # --- Perform slicing outside the JITted function ---
+    black_T = (total_steps + 1) // 2
+    white_T = total_steps // 2
 
-# ==============================================================================
-# == Pytest Fixtures ==
-# ==============================================================================
-# Fixtures provide reusable setup code (mock instances, data) for tests.
+    black_indices = jnp.arange(0, total_steps, 2)
+    white_indices = jnp.arange(1, total_steps, 2)
 
-
-@pytest.fixture
-def mock_actor_critic_instance():
-    """Provides an instance of the MockActorCritic."""
-    return MockActorCritic()
-
-
-@pytest.fixture
-def mock_params():
-    """Provides empty mock parameters (sufficient for MockActorCritic)."""
-    return FrozenDict({})
-
-
-@pytest.fixture
-def mock_env_state():
-    """Provides a sample initial environment state dictionary."""
-    board_size = 5
-    B = 2  # Batch size
-    return {
-        "board_size": board_size,
-        "B": B,
-        "boards": jnp.zeros((B, board_size, board_size), dtype=jnp.int32),
-        "current_player": jnp.ones(B, dtype=jnp.int32),  # Player 1 starts
-        "dones": jnp.zeros(B, dtype=jnp.bool_),
-        "steps": 0,  # Custom field for mock step tracking
+    # Extract black player data
+    black_trajectory = {
+        key: arr[black_indices] for key, arr in full_trajectory.items() if key != "T" # Exclude T during copy
     }
+    black_trajectory["T"] = black_T
+
+    # Extract white player data
+    white_trajectory = {
+        key: arr[white_indices] for key, arr in full_trajectory.items() if key != "T" # Exclude T during copy
+    }
+    white_trajectory["T"] = white_T
+    # --- End Slicing ---
+
+    # Check shapes for black player
+    assert black_trajectory["observations"].shape == (black_T, TEST_BATCH_SIZE) + env.observation_shape
+    assert black_trajectory["actions"].shape == (black_T, TEST_BATCH_SIZE) + env.action_shape
+    assert black_trajectory["rewards"].shape == (black_T, TEST_BATCH_SIZE)
+    assert black_trajectory["dones"].shape == (black_T, TEST_BATCH_SIZE)
+    assert black_trajectory["logprobs"].shape == (black_T, TEST_BATCH_SIZE)
+
+    # Check dtypes for black player
+    assert black_trajectory["observations"].dtype == jnp.float32
+    assert black_trajectory["actions"].dtype == jnp.int32
+    assert black_trajectory["rewards"].dtype == jnp.float32
+    assert black_trajectory["dones"].dtype == jnp.bool_
+    assert black_trajectory["logprobs"].dtype == jnp.float32
+
+    # Check shapes for white player
+    assert white_trajectory["observations"].shape == (white_T, TEST_BATCH_SIZE) + env.observation_shape
+    assert white_trajectory["actions"].shape == (white_T, TEST_BATCH_SIZE) + env.action_shape
+    assert white_trajectory["rewards"].shape == (white_T, TEST_BATCH_SIZE)
+    assert white_trajectory["dones"].shape == (white_T, TEST_BATCH_SIZE)
+    assert white_trajectory["logprobs"].shape == (white_T, TEST_BATCH_SIZE)
+
+    # Check dtypes for white player
+    assert white_trajectory["observations"].dtype == jnp.float32
+    assert white_trajectory["actions"].dtype == jnp.int32
+    assert white_trajectory["rewards"].dtype == jnp.float32
+    assert white_trajectory["dones"].dtype == jnp.bool_
+    assert white_trajectory["logprobs"].dtype == jnp.float32
 
 
-@pytest.fixture
-def rng():
-    """Provides a fixed JAX PRNGKey for deterministic tests."""
-    return jax.random.PRNGKey(42)
+def test_run_episode_termination_done(env, mock_actor_critic, mock_params, rng):
+    """Tests termination based on done flags."""
+    # Use a quick game environment
+    quick_env = GomokuJaxEnv(B=TEST_BATCH_SIZE, board_size=TEST_BOARD_SIZE, win_length=2)
+    quick_mock_ac = MockActorCritic(quick_env)
+    # Use a buffer size guaranteed to be large enough
+    buffer_size = quick_env.board_size * quick_env.board_size
 
-
-@pytest.fixture(autouse=True)
-def patch_env_functions(monkeypatch):
-    """Automatically replaces real env functions with mocks for all tests."""
-    monkeypatch.setattr("training.rollout.reset_env", mock_reset_env)
-    monkeypatch.setattr("training.rollout.step_env", mock_step_env)
-    monkeypatch.setattr("training.rollout.get_action_mask", mock_get_action_mask)
-
-
-# ==============================================================================
-# == Test Cases ==
-# ==============================================================================
-
-# --- Tests for calculate_returns ---
-
-
-def test_calculate_returns():
-    """Tests discounted return calculation with a standard trajectory."""
-    rewards = jnp.array(
-        [
-            [0.0, 0.0],  # T=0
-            [0.0, 0.0],  # T=1
-            [1.0, 0.0],  # T=2
-            [0.0, 1.0],  # T=3
-            [0.0, 0.0],  # T=4
-        ]
-    )  # Shape (T=5, B=2)
-    gamma = 0.9
-    # Expected: R_t = r_t + gamma * R_{t+1}
-    # R_4 = [0, 0]
-    # R_3 = [0, 1] + 0.9 * [0, 0] = [0, 1]
-    # R_2 = [1, 0] + 0.9 * [0, 1] = [1, 0.9]
-    # R_1 = [0, 0] + 0.9 * [1, 0.9] = [0.9, 0.81]
-    # R_0 = [0, 0] + 0.9 * [0.9, 0.81] = [0.81, 0.729]
-    expected_returns = jnp.array(
-        [
-            [0.81, 0.729],
-            [0.9, 0.81],
-            [1.0, 0.9],
-            [0.0, 1.0],
-            [0.0, 0.0],
-        ]
+    full_traj_done, _ = run_episode(
+        quick_env, quick_mock_ac, mock_params, quick_mock_ac, mock_params, rng, buffer_size
     )
-    returns = calculate_returns(rewards, gamma)
-    assert returns.shape == rewards.shape
-    assert jnp.allclose(returns, expected_returns, atol=1e-3)
+    total_T_done = full_traj_done["T"]
+    assert total_T_done < buffer_size, "Game should finish before buffer fills"
+
+    # Check last done flag in the full trajectory buffer
+    if total_T_done > 0:
+        last_dones = full_traj_done["dones"][total_T_done - 1]
+        assert jnp.any(last_dones) # Game ended for at least one env
+        # Check if all environments were done (loop terminates on all done)
+        assert jnp.all(last_dones)
+
+def test_run_episode_rng_update(env, mock_actor_critic, mock_params, rng):
+    """Tests if the PRNGKey is updated after run_episode."""
+    _, final_rng = run_episode(
+        env, mock_actor_critic, mock_params, mock_actor_critic, mock_params, rng, TEST_BUFFER_SIZE
+    )
+    assert not jnp.array_equal(rng, final_rng)
+
+    # Optional: run again and check RNG is different again
+    _, final_rng_2 = run_episode(
+        env, mock_actor_critic, mock_params, mock_actor_critic, mock_params, final_rng, TEST_BUFFER_SIZE
+    )
+    assert not jnp.array_equal(final_rng, final_rng_2)
 
 
-def test_calculate_returns_single_step():
-    """Tests discounted return calculation with a short trajectory."""
-    rewards = jnp.array([[1.0], [2.0]])  # Shape (T=2, B=1)
-    gamma = 0.5
-    # R_1 = [2.0]
-    # R_0 = [1.0] + 0.5 * [2.0] = [2.0]
-    expected_returns = jnp.array([[2.0], [2.0]])
-    returns = calculate_returns(rewards, gamma)
-    assert returns.shape == rewards.shape
-    assert jnp.allclose(returns, expected_returns, atol=1e-3)
+def test_calculate_returns_simple():
+    """Tests calculate_returns with a simple sequence."""
+    # Shape (T, B) = (3, 2)
+    rewards = jnp.array([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]])
+    dones = jnp.array([[False, False], [False, False], [False, False]])
+    gamma = 0.9
+
+    # Expected returns (calculated manually, reverse):
+    # R2 = 1.0 + 0.9 * 0 = 1.0
+    # R1 = 1.0 + 0.9 * R2 = 1.0 + 0.9 * 1.0 = 1.9
+    # R0 = 1.0 + 0.9 * R1 = 1.0 + 0.9 * 1.9 = 1.0 + 1.71 = 2.71
+    expected_returns_b0 = jnp.array([2.71, 1.9, 1.0])
+    # R2 = 0.0 + 0.9 * 0 = 0.0
+    # R1 = 0.0 + 0.9 * R2 = 0.0
+    # R0 = 0.0 + 0.9 * R1 = 0.0
+    expected_returns_b1 = jnp.array([0.0, 0.0, 0.0])
+    expected_returns = jnp.stack([expected_returns_b0, expected_returns_b1], axis=1)
+
+    actual_returns = calculate_returns(rewards, dones, gamma)
+
+    np.testing.assert_allclose(actual_returns, expected_returns, rtol=1e-6)
+
+def test_calculate_returns_with_done():
+    """Tests calculate_returns with an episode ending mid-sequence."""
+    # Shape (T, B) = (4, 2)
+    rewards = jnp.array([[0.0, 1.0], [0.0, 1.0], [1.0, 1.0], [0.0, 0.0]]) # R for s0, s1, s2, s3
+    dones = jnp.array([[False, False], [False, False], [True, False], [False, True]]) # d for a0, a1, a2, a3 -> s1, s2, s3(term), s4(term)
+    gamma = 0.9
+
+    # Expected returns (calculated manually):
+    # Batch 0:
+    # R3 = 0.0 + 0.9 * 0 * (1-T) = 0.0 (state s4 is terminal due to d[3]=T) - Note: The func impl doesn't use future dones
+    # R2 = 1.0 + 0.9 * R3 * (1-F) = 1.0 + 0.9 * 0 = 1.0  (State s3 is terminal, d[2]=T, so returns stop here)
+    # R1 = 0.0 + 0.9 * R2 * (1-F) = 0.0 + 0.9 * 1.0 = 0.9
+    # R0 = 0.0 + 0.9 * R1 * (1-F) = 0.0 + 0.9 * 0.9 = 0.81
+    # expected_returns_b0 = jnp.array([0.81, 0.9, 1.0, 0.0]) # ORIGINAL
+    # Scan Logic: R_t = r_t + gamma * R_{t+1} * (1 - d_t)
+    # Reverse Scan:
+    # carry = 0.0
+    # step (r3=0, d3=T): new_carry = 0.0 + 0.9 * 0 * (1-1) = 0.0. Returns = [0.0]
+    # step (r2=1, d2=T): new_carry = 1.0 + 0.9 * 0 * (1-1) = 1.0. Returns = [1.0, 0.0]
+    # step (r1=0, d1=F): new_carry = 0.0 + 0.9 * 1 * (1-0) = 0.9. Returns = [0.9, 1.0, 0.0]
+    # step (r0=0, d0=F): new_carry = 0.0 + 0.9 * 0.9 * (1-0) = 0.81. Returns = [0.81, 0.9, 1.0, 0.0]
+    expected_returns_b0 = jnp.array([0.81, 0.9, 1.0, 0.0])
+
+    # Batch 1:
+    # R3 = 0.0 + 0.9 * 0 * (1-T) = 0.0 (State s4 terminal)
+    # R2 = 1.0 + 0.9 * R3 * (1-F) = 1.0 + 0.9 * 0 = 1.0
+    # R1 = 1.0 + 0.9 * R2 * (1-F) = 1.0 + 0.9 * 1.0 = 1.9
+    # R0 = 1.0 + 0.9 * R1 * (1-F) = 1.0 + 0.9 * 1.9 = 1.0 + 1.71 = 2.71
+    # expected_returns_b1 = jnp.array([2.71, 1.9, 1.0, 0.0]) # ORIGINAL
+    # Scan Logic: R_t = r_t + gamma * R_{t+1} * (1 - d_t)
+    # Reverse Scan:
+    # carry = 0.0
+    # step (r3=0, d3=T): new_carry = 0.0 + 0.9 * 0 * (1-1) = 0.0. Returns = [0.0]
+    # step (r2=1, d2=F): new_carry = 1.0 + 0.9 * 0 * (1-0) = 1.0. Returns = [1.0, 0.0]
+    # step (r1=1, d1=F): new_carry = 1.0 + 0.9 * 1 * (1-0) = 1.9. Returns = [1.9, 1.0, 0.0]
+    # step (r0=1, d0=F): new_carry = 1.0 + 0.9 * 1.9 * (1-0) = 1.0 + 1.71 = 2.71. Returns = [2.71, 1.9, 1.0, 0.0]
+    expected_returns_b1 = jnp.array([2.71, 1.9, 1.0, 0.0])
+
+    expected_returns = jnp.stack([expected_returns_b0, expected_returns_b1], axis=1)
+    actual_returns = calculate_returns(rewards, dones, gamma)
+    np.testing.assert_allclose(actual_returns, expected_returns, rtol=1e-6)
 
 
-# --- Tests for calculate_gae ---
-
-
-def test_calculate_gae():
-    """Tests Generalized Advantage Estimation (GAE) calculation."""
-    # Note: Focuses on shapes and execution, specific values require careful manual calculation or a reference.
-    rewards = jnp.array(
-        [
-            [0.0, 0.0],
-            [0.0, 0.0],
-            [1.0, 0.0],  # Terminal state for batch 0 at T=2
-            [0.0, 1.0],  # Terminal state for batch 1 at T=3
-            [
-                0.0,
-                0.0,
-            ],  # Should not occur if dones handled correctly, but included for test robustness
-        ]
-    )  # Shape (T=5, B=2)
-    values = jnp.array(
-        [
-            [0.1, 0.1],
-            [0.2, 0.2],
-            [0.3, 0.3],  # V(s_2)
-            [0.4, 0.4],  # V(s_3)
-            [0.5, 0.5],  # V(s_4) (value after terminal state)
-        ]
-    )  # Shape (T=5, B=2)
-    dones = jnp.array(
-        [
-            [0.0, 0.0],
-            [0.0, 0.0],
-            [1.0, 0.0],  # Done=True for B=0 at T=2
-            [0.0, 1.0],  # Done=True for B=1 at T=3
-            [1.0, 1.0],  # Assume dones propagate for subsequent steps for consistency
-        ],
-        dtype=jnp.float32,
-    )  # Use float for masking calculations
+def test_calculate_gae_simple():
+    """Tests calculate_gae with a simple sequence."""
+    # Shape (T, B) = (3, 1)
+    rewards = jnp.array([[1.0], [1.0], [1.0]])
+    dones = jnp.array([[False], [False], [False]])
+    # values need shape (T+1, B) = (4, 1)
+    values = jnp.array([[0.5], [0.6], [0.7], [0.8]]) # V(s0), V(s1), V(s2), V(s3)
     gamma = 0.9
     gae_lambda = 0.95
 
-    # delta_t = r_t + gamma * V(s_{t+1}) * (1 - done_{t+1}) - V(s_t)
-    # A_t = delta_t + gamma * gae_lambda * A_{t+1} * (1 - done_{t+1})
-    # Example: B=0, T=2 (last step before done)
-    # delta_2 = r_2 + gamma*V(s_3)*(1-done_3) - V(s_2) = 1.0 + 0.9*0.4*(1-0) - 0.3 = 1 + 0.36 - 0.3 = 1.06
-    # A_3 is needed. Assume A_4 = 0 as it's terminal.
-    # delta_3 = r_3 + gamma*V(s_4)*(1-done_4) - V(s_3) = 0.0 + 0.9*0.5*(1-1) - 0.4 = -0.4
-    # A_3 = delta_3 + gamma*gae_lambda*A_4*(1-done_4) = -0.4 + 0.9*0.95*0*(1-1) = -0.4
-    # A_2 = delta_2 + gamma*gae_lambda*A_3*(1-done_3) = 1.06 + 0.9*0.95*(-0.4)*(1-0) = 1.06 - 0.342 = 0.718
+    # Manual calculation (reverse):
+    # t=2:
+    # delta_2 = r_2 + gamma * V(s3) * (1-d2) - V(s2)
+    #         = 1.0 + 0.9 * 0.8 * (1-0) - 0.7 = 1.0 + 0.72 - 0.7 = 1.02
+    # gae_2   = delta_2 + gamma * lambda * (1-d2) * gae_3 (assume gae_3=0)
+    #         = 1.02 + 0.9 * 0.95 * (1-0) * 0 = 1.02
+    # t=1:
+    # delta_1 = r_1 + gamma * V(s2) * (1-d1) - V(s1)
+    #         = 1.0 + 0.9 * 0.7 * (1-0) - 0.6 = 1.0 + 0.63 - 0.6 = 1.03
+    # gae_1   = delta_1 + gamma * lambda * (1-d1) * gae_2
+    #         = 1.03 + 0.9 * 0.95 * (1-0) * 1.02 = 1.03 + 0.855 * 1.02 = 1.03 + 0.8721 = 1.9021
+    # t=0:
+    # delta_0 = r_0 + gamma * V(s1) * (1-d0) - V(s0)
+    #         = 1.0 + 0.9 * 0.6 * (1-0) - 0.5 = 1.0 + 0.54 - 0.5 = 1.04
+    # gae_0   = delta_0 + gamma * lambda * (1-d0) * gae_1
+    #         = 1.04 + 0.9 * 0.95 * (1-0) * 1.9021 = 1.04 + 0.855 * 1.9021 = 1.04 + 1.6262955 = 2.6662955
 
-    advantages = calculate_gae(rewards, values, dones, gamma, gae_lambda)
-    assert advantages.shape == rewards.shape
-    # Add more specific value checks here if a trusted GAE implementation is available for comparison.
-    # print("Calculated GAE:\n", advantages)
+    expected_advantages = jnp.array([[2.6662955], [1.9021], [1.02]])
+    expected_returns = expected_advantages + values[:-1] # Add V(s0), V(s1), V(s2)
 
+    actual_advantages, actual_returns = calculate_gae(rewards, values, dones, gamma, gae_lambda)
 
-# --- Tests for run_selfplay ---
-
-
-def test_run_selfplay(mock_env_state, mock_actor_critic_instance, mock_params, rng):
-    """Tests the self-play rollout function using mocks."""
-    # Relies on mocked environment functions via patch_env_functions fixture
-    max_mock_steps = 5  # Must match mock_step_env
-    board_size = mock_env_state["board_size"]
-    B = mock_env_state["B"]
-
-    # --- Execute ---
-    trajectory, final_rng = run_selfplay(
-        mock_env_state, mock_actor_critic_instance, mock_params, rng
-    )
-
-    # --- Assertions ---
-    assert isinstance(trajectory, dict)
-    # Check required keys exist
-    assert "observations" in trajectory  # Renamed from 'obs' in function
-    assert "actions" in trajectory
-    assert "rewards" in trajectory
-    assert "masks" in trajectory
-    assert "T" in trajectory
-    assert "env_state" in trajectory  # Contains final env state
-    assert "obs" in trajectory  # Contains final observation
-    assert "logprobs" in trajectory  # Check for logprobs
-
-    # Check trajectory length
-    T = trajectory["T"]
-    assert T == max_mock_steps  # Mock env has fixed length
-
-    # Check shapes of collected data (Time, Batch, ...)
-    # Note: Arrays are pre-allocated to max_steps, check relevant dimensions
-    assert len(trajectory["observations"].shape) == 4
-    assert trajectory["observations"].shape[0] >= T  # Time dim >= actual steps
-    assert trajectory["observations"].shape[1] == B  # Batch dim
-    assert trajectory["observations"].shape[2:] == (
-        board_size,
-        board_size,
-    )  # Observation dims
-
-    assert len(trajectory["actions"].shape) == 3
-    assert trajectory["actions"].shape[0] >= T
-    assert trajectory["actions"].shape[1] == B
-    assert trajectory["actions"].shape[2] == 2  # Action dim
-
-    assert len(trajectory["rewards"].shape) == 2
-    assert trajectory["rewards"].shape[0] >= T
-    assert trajectory["rewards"].shape[1] == B
-
-    assert len(trajectory["masks"].shape) == 2
-    assert trajectory["masks"].shape[0] >= T
-    assert trajectory["masks"].shape[1] == B
-
-    # Check logprobs shape
-    assert len(trajectory["logprobs"].shape) == 2
-    assert trajectory["logprobs"].shape[0] >= T
-    assert trajectory["logprobs"].shape[1] == B
-
-    # Check final state termination
-    assert "dones" in trajectory["env_state"]
-    assert jnp.all(trajectory["env_state"]["dones"]), "All envs should be done"
-
-    # Check RNG consumption
-    assert not jnp.array_equal(rng, final_rng), "RNG key should be updated"
+    np.testing.assert_allclose(actual_advantages, expected_advantages, rtol=1e-5)
+    np.testing.assert_allclose(actual_returns, expected_returns, rtol=1e-5)
 
 
-# --- Tests for run_episode ---
+def test_calculate_gae_with_done():
+    """Tests calculate_gae with episode termination."""
+     # Shape (T, B) = (3, 1)
+    rewards = jnp.array([[1.0], [1.0], [1.0]])
+    dones = jnp.array([[False], [False], [True]]) # Episode ends after step 2 (action a2 leads to s3 which is terminal)
+    # values need shape (T+1, B) = (4, 1)
+    values = jnp.array([[0.5], [0.6], [0.7], [0.0]]) # V(s0), V(s1), V(s2), V(s3)=0 because s3 is terminal
+    gamma = 0.9
+    gae_lambda = 0.95
+
+    # Manual calculation (reverse):
+    # t=2:
+    # delta_2 = r_2 + gamma * V(s3) * (1-d2) - V(s2)
+    #         = 1.0 + 0.9 * 0.0 * (1-1) - 0.7 = 1.0 + 0 - 0.7 = 0.3
+    # gae_2   = delta_2 + gamma * lambda * (1-d2) * gae_3 (assume gae_3=0)
+    #         = 0.3 + 0.9 * 0.95 * (1-1) * 0 = 0.3
+    # t=1:
+    # delta_1 = r_1 + gamma * V(s2) * (1-d1) - V(s1)
+    #         = 1.0 + 0.9 * 0.7 * (1-0) - 0.6 = 1.0 + 0.63 - 0.6 = 1.03
+    # gae_1   = delta_1 + gamma * lambda * (1-d1) * gae_2
+    #         = 1.03 + 0.9 * 0.95 * (1-0) * 0.3 = 1.03 + 0.855 * 0.3 = 1.03 + 0.2565 = 1.2865
+    # t=0:
+    # delta_0 = r_0 + gamma * V(s1) * (1-d0) - V(s0)
+    #         = 1.0 + 0.9 * 0.6 * (1-0) - 0.5 = 1.0 + 0.54 - 0.5 = 1.04
+    # gae_0   = delta_0 + gamma * lambda * (1-d0) * gae_1
+    #         = 1.04 + 0.9 * 0.95 * (1-0) * 1.2865 = 1.04 + 0.855 * 1.2865 = 1.04 + 1.0999575 = 2.1399575
+
+    expected_advantages = jnp.array([[2.1399575], [1.2865], [0.3]])
+    expected_returns = expected_advantages + values[:-1] # Add V(s0), V(s1), V(s2)
+
+    actual_advantages, actual_returns = calculate_gae(rewards, values, dones, gamma, gae_lambda)
+
+    np.testing.assert_allclose(actual_advantages, expected_advantages, rtol=1e-5)
+    np.testing.assert_allclose(actual_returns, expected_returns, rtol=1e-5)
 
 
-def test_run_episode(mock_env_state, mock_actor_critic_instance, mock_params, rng):
-    """Tests the two-player episode rollout function using mocks."""
-    # Relies on mocked environment functions via patch_env_functions fixture
-    max_mock_steps = 5  # Must match mock_step_env
-    board_size = mock_env_state["board_size"]
-    B = mock_env_state["B"]
+def test_calculate_gae_shapes():
+    """Tests the output shapes of calculate_gae."""
+    T, B = 5, 4
+    rewards = jnp.zeros((T, B))
+    dones = jnp.zeros((T, B), dtype=bool)
+    values = jnp.zeros((T + 1, B)) # Needs T+1 time steps
+    gamma = 0.99
+    gae_lambda = 0.95
 
-    # Use the same mock model for black and white players for simplicity
-    black_ac = mock_actor_critic_instance
-    white_ac = mock_actor_critic_instance
-    black_params = mock_params
-    white_params = mock_params
+    advantages, returns = calculate_gae(rewards, values, dones, gamma, gae_lambda)
 
-    # --- Execute ---
-    black_traj, white_traj, final_rng = run_episode(
-        mock_env_state, black_ac, black_params, white_ac, white_params, rng
-    )
+    assert advantages.shape == (T, B)
+    assert returns.shape == (T, B)
+    assert advantages.dtype == jnp.float32 # Or float64 depending on precision
+    assert returns.dtype == jnp.float32
 
-    # --- Assertions ---
-    assert isinstance(black_traj, dict)
-    assert isinstance(white_traj, dict)
-    # Check required keys
-    for traj in [black_traj, white_traj]:
-        assert "obs" in traj
-        assert "actions" in traj
-        assert "rewards" in traj
-        assert "masks" in traj
-        assert "T" in traj
-        assert "logprobs" in traj  # Check for logprobs
 
-    # Check trajectory lengths (T represents number of turns for that player)
-    total_steps = max_mock_steps
-    expected_black_len = (total_steps + 1) // 2  # Black moves first (steps 0, 2, 4...)
-    expected_white_len = total_steps // 2  # White moves second (steps 1, 3...)
-    assert black_traj["T"] == expected_black_len
-    assert white_traj["T"] == expected_white_len
-
-    # Check black trajectory shapes (Turns, Batch, ...)
-    # Note: Shape[0] will be based on max_steps due to JIT pre-allocation
-    max_possible_steps = board_size * board_size
-    expected_black_shape_len = (max_possible_steps + 1) // 2
-    assert len(black_traj["obs"].shape) == 4
-    assert (
-        black_traj["obs"].shape[0] == expected_black_shape_len
-    )  # Num turns based on max_steps
-    assert black_traj["obs"].shape[1] == B
-    assert black_traj["obs"].shape[2:] == (board_size, board_size)
-
-    assert len(black_traj["actions"].shape) == 3
-    assert black_traj["actions"].shape[0] == expected_black_shape_len
-    assert black_traj["actions"].shape[1] == B
-    assert black_traj["actions"].shape[2] == 2
-
-    assert len(black_traj["rewards"].shape) == 2
-    assert black_traj["rewards"].shape[0] == expected_black_shape_len
-    assert black_traj["rewards"].shape[1] == B
-
-    assert len(black_traj["masks"].shape) == 2
-    assert black_traj["masks"].shape[0] == expected_black_shape_len
-    assert black_traj["masks"].shape[1] == B
-
-    # Check black logprobs shape
-    assert len(black_traj["logprobs"].shape) == 2
-    assert black_traj["logprobs"].shape[0] == expected_black_shape_len
-    assert black_traj["logprobs"].shape[1] == B
-
-    # Check white trajectory shapes (Turns, Batch, ...)
-    expected_white_shape_len = max_possible_steps // 2
-    assert len(white_traj["obs"].shape) == 4
-    assert (
-        white_traj["obs"].shape[0] == expected_white_shape_len
-    )  # Num turns based on max_steps
-    assert white_traj["obs"].shape[1] == B
-    assert white_traj["obs"].shape[2:] == (board_size, board_size)
-
-    assert len(white_traj["actions"].shape) == 3
-    assert white_traj["actions"].shape[0] == expected_white_shape_len
-    assert white_traj["actions"].shape[1] == B
-    assert white_traj["actions"].shape[2] == 2
-
-    assert len(white_traj["rewards"].shape) == 2
-    assert white_traj["rewards"].shape[0] == expected_white_shape_len
-    assert white_traj["rewards"].shape[1] == B
-
-    assert len(white_traj["masks"].shape) == 2
-    assert white_traj["masks"].shape[0] == expected_white_shape_len
-    assert white_traj["masks"].shape[1] == B
-
-    # Check white logprobs shape
-    assert len(white_traj["logprobs"].shape) == 2
-    assert white_traj["logprobs"].shape[0] == expected_white_shape_len
-    assert white_traj["logprobs"].shape[1] == B
-
-    # Check final state masks/termination implicitly via lengths and mock env logic
-    # (More specific checks could be added if needed, e.g., final rewards)
-
-    # Check RNG consumption
-    assert not jnp.array_equal(rng, final_rng), "RNG key should be updated"
-    print("black player rewards", black_traj["rewards"])
-    print("white player rewards", white_traj["rewards"])
