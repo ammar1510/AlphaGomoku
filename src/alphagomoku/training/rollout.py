@@ -3,6 +3,7 @@ import jax.numpy as jnp
 from jax import lax, jit
 from functools import partial
 from typing import Dict, Any, Tuple, NamedTuple
+import distrax # Added import
 
 # Import the base environment class and the type hint for state
 from alphagomoku.environments.base import JaxEnvBase, EnvState
@@ -33,17 +34,40 @@ def player_move(loop_state: LoopState, env: JaxEnvBase, actor_critic: Any, param
     current_state: EnvState = loop_state.state
     current_obs: jnp.ndarray = loop_state.obs
     step_idx: int = loop_state.step_idx
+    rng = loop_state.rng
 
-    policy_logits, _ = actor_critic.apply(params, current_obs) # Assume actor_critic outputs logits and value
-    action_mask = env.get_action_mask(current_state) # (B, ...) depends on env action space
-    masked_logits = jnp.where(action_mask, policy_logits, -jnp.inf)
+    # Get policy distribution and value from the model
+    # Assuming actor_critic.apply returns (distrax_distribution, value)
+    pi_dist, _ = actor_critic.apply({"params": params}, current_obs)
 
-    rng, subkey = jax.random.split(loop_state.rng)
-    action = actor_critic.sample_action(masked_logits, subkey)
-    logprob = actor_critic.log_prob(masked_logits, action)
+    # Get action mask from the environment (assuming shape compatible with logits)
+    # Gomoku env returns (B, H, W), logits are typically (B, H*W) or (B, H, W)
+    # Need to ensure consistency. Assuming model outputs flat logits.
+    action_mask = env.get_action_mask(current_state) # (B, H, W)
+    B, H, W = action_mask.shape
+    flat_action_mask = action_mask.reshape(B, -1) # (B, H*W)
+
+    # Get original logits from the distribution
+    original_logits = pi_dist.logits # Shape (B, H*W)
+
+    # Apply the mask to the logits
+    masked_logits = jnp.where(flat_action_mask, original_logits, -jnp.inf)
+
+    # Create a new distribution with masked logits
+    masked_pi_dist = distrax.Categorical(logits=masked_logits)
+
+    # Sample action from the masked distribution
+    rng, subkey = jax.random.split(rng)
+    flat_action = masked_pi_dist.sample(seed=subkey) # Shape (B,)
+    logprob = masked_pi_dist.log_prob(flat_action)   # Shape (B,)
+
+    # Convert flat action back to (row, col) for the environment step
+    action_row = flat_action // W
+    action_col = flat_action % W
+    action = jnp.stack([action_row, action_col], axis=-1) # Shape (B, 2)
 
     observations = loop_state.observations.at[step_idx].set(current_obs)
-    actions = loop_state.actions.at[step_idx].set(action)
+    actions = loop_state.actions.at[step_idx].set(action) # Store the (row, col) action
     logprobs = loop_state.logprobs.at[step_idx].set(logprob)
 
     next_state, next_obs, step_rewards, dones, info = env.step(current_state, action)
@@ -141,7 +165,7 @@ def run_episode(
     white_params: Any,
     rng: jax.random.PRNGKey,
     buffer_size: int
-) -> Tuple[Dict[str, Any], jax.random.PRNGKey]: # Return full buffers, rng
+) -> Tuple[Dict[str, Any], jnp.ndarray, jax.random.PRNGKey]: # Return full buffers, final_obs, rng
     """
     Collect trajectories for self-play with separate black and white models.
     Runs until all environments are done.
@@ -157,8 +181,9 @@ def run_episode(
         buffer_size: The size of the trajectory buffers to allocate.
 
     Returns:
-        full_trajectory: Dict containing the full, un-sliced buffers (observations, actions, rewards, dones, logprobs).
+        full_trajectory: Dict containing the full, un-sliced buffers (observations, actions, rewards, dones, logprobs, valid_mask, T, termination_indices).
                          Arrays have length buffer_size.
+        final_obs: The observation after the final step taken in the loop, shape (B, ...).
         rng: updated RNG key.
 
     Note: This function can simulate the behavior of `run_selfplay` function
@@ -241,8 +266,9 @@ def run_episode(
         "termination_step_indices": final_state.termination_step_indices, # Keep this too if needed elsewhere
     }
     rng = final_state.rng
+    final_obs = final_state.obs # Capture the observation *after* the last step
 
-    return full_trajectory, rng
+    return full_trajectory, final_obs, rng
 
 
 # --- Utility functions for GAE/Returns (remain the same, check types) ---

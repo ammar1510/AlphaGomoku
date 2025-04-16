@@ -5,16 +5,7 @@ board_size: 9
 
 # Training parameters
 num_boards : 256
-learning_rate: 0.0001
-weight_decay: 0.0001
-discount: 0.99
 total_iterations: 1000000
-grad_clip_norm: 1.0
-
-# Entropy annealing
-initial_entropy_coef: 0.1   # increased this to increase exploration 
-min_entropy_coef: 0.0001      
-entropy_decay_steps: 50000   # Steps over which to decay entropy
 
 # Evaluation parameters
 #kept same as save_frequency
