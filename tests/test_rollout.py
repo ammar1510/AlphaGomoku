@@ -7,7 +7,6 @@ from typing import Any, NamedTuple, Tuple
 
 # Import the components to test
 from alphagomoku.training.rollout import (
-    run_selfplay,
     run_episode,
     calculate_returns,
     calculate_gae,
@@ -95,79 +94,82 @@ def rng() -> PRNGKey:
 
 # --- Test Functions ---
 
-def test_run_selfplay_execution_and_shapes(env, mock_actor_critic, mock_params, rng):
-    """Tests if run_selfplay executes and returns data with expected shapes."""
-    trajectory, final_rng = run_selfplay(env, mock_actor_critic, mock_params, rng, TEST_BUFFER_SIZE)
+# ---- Tests for run_selfplay (commented out in source) ----
 
-    assert isinstance(trajectory, dict)
-    assert final_rng is not None
-    assert not jnp.array_equal(rng, final_rng) # RNG should change
+# def test_run_selfplay_execution_and_shapes(env, mock_actor_critic, mock_params, rng):
+#     """Tests if run_selfplay executes and returns data with expected shapes."""
+#     trajectory, final_rng = run_selfplay(env, mock_actor_critic, mock_params, rng, TEST_BUFFER_SIZE)
+#
+#     assert isinstance(trajectory, dict)
+#     assert final_rng is not None
+#     assert not jnp.array_equal(rng, final_rng) # RNG should change
+#
+#     T = trajectory["T"]
+#     assert T > 0 and T <= TEST_BUFFER_SIZE
+#
+#     # Check shapes of the arrays (should match buffer_size)
+#     assert trajectory["observations"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE) + env.observation_shape
+#     assert trajectory["actions"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE) + env.action_shape
+#     assert trajectory["rewards"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE)
+#     assert trajectory["dones"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE)
+#     assert trajectory["logprobs"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE)
+#
+#     # Check dtypes
+#     assert trajectory["observations"].dtype == jnp.float32
+#     assert trajectory["actions"].dtype == jnp.int32
+#     assert trajectory["rewards"].dtype == jnp.float32
+#     assert trajectory["dones"].dtype == jnp.bool_
+#     assert trajectory["logprobs"].dtype == jnp.float32
+#
+#     # Check that data beyond T is zero (or expected fill value)
+#     if T < TEST_BUFFER_SIZE:
+#         np.testing.assert_array_equal(trajectory["observations"][T:], jnp.zeros_like(trajectory["observations"][T:]))
+#         np.testing.assert_array_equal(trajectory["actions"][T:], jnp.zeros_like(trajectory["actions"][T:]))
+#         np.testing.assert_array_equal(trajectory["rewards"][T:], jnp.zeros_like(trajectory["rewards"][T:]))
+#         np.testing.assert_array_equal(trajectory["dones"][T:], jnp.zeros_like(trajectory["dones"][T:])) # Buffer is initialized with False
+#         np.testing.assert_array_equal(trajectory["logprobs"][T:], jnp.zeros_like(trajectory["logprobs"][T:]))
+#
+#
+# def test_run_selfplay_termination_done(env, mock_actor_critic, mock_params, rng):
+#     """Tests if run_selfplay terminates when the environment is done."""
+#     # Use a very small win length to force a quick game
+#     quick_env = GomokuJaxEnv(B=TEST_BATCH_SIZE, board_size=TEST_BOARD_SIZE, win_length=2)
+#     # Create a mock AC for this specific env
+#     quick_mock_ac = MockActorCritic(quick_env)
+#     # Use a buffer size guaranteed to be large enough
+#     buffer_size = quick_env.board_size * quick_env.board_size
+#
+#     trajectory, _ = run_selfplay(quick_env, quick_mock_ac, mock_params, rng, buffer_size)
+#
+#     T = trajectory["T"]
+#     assert T < buffer_size # Game should finish quickly
+#
+#     # Check that the last stored done flag corresponds to the step T-1
+#     # The trajectory length T means steps 0 to T-1 were executed.
+#     # The 'dones' buffer stores the done flag *after* the step.
+#     # So, dones[T-1] should contain the terminal state for at least one env.
+#     last_dones = trajectory["dones"][T - 1]
+#     assert jnp.any(last_dones) # At least one game should be done at step T-1
+#
+#     # Check if all are done if T < buffer_size (while loop condition)
+#     # If T < buffer_size, it implies the loop terminated because jnp.all(dones) was true.
+#     if T < buffer_size:
+#          assert jnp.all(last_dones)
+#
+#
+# # No max_steps termination test needed as loop primarily terminates on done.
+# # The buffer size check is just a safety measure.
+#
+# def test_run_selfplay_rng_update(env, mock_actor_critic, mock_params, rng):
+#     """Tests if the PRNGKey is updated after run_selfplay."""
+#     _, final_rng = run_selfplay(env, mock_actor_critic, mock_params, rng, TEST_BUFFER_SIZE)
+#     assert not jnp.array_equal(rng, final_rng)
+#
+#     # Optional: run again and check RNG is different again
+#     _, final_rng_2 = run_selfplay(env, mock_actor_critic, mock_params, final_rng, TEST_BUFFER_SIZE)
+#     assert not jnp.array_equal(final_rng, final_rng_2)
 
-    T = trajectory["T"]
-    assert T > 0 and T <= TEST_BUFFER_SIZE
-
-    # Check shapes of the arrays (should match buffer_size)
-    assert trajectory["observations"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE) + env.observation_shape
-    assert trajectory["actions"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE) + env.action_shape
-    assert trajectory["rewards"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE)
-    assert trajectory["dones"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE)
-    assert trajectory["logprobs"].shape == (TEST_BUFFER_SIZE, TEST_BATCH_SIZE)
-
-    # Check dtypes
-    assert trajectory["observations"].dtype == jnp.float32
-    assert trajectory["actions"].dtype == jnp.int32
-    assert trajectory["rewards"].dtype == jnp.float32
-    assert trajectory["dones"].dtype == jnp.bool_
-    assert trajectory["logprobs"].dtype == jnp.float32
-
-    # Check that data beyond T is zero (or expected fill value)
-    if T < TEST_BUFFER_SIZE:
-        np.testing.assert_array_equal(trajectory["observations"][T:], jnp.zeros_like(trajectory["observations"][T:]))
-        np.testing.assert_array_equal(trajectory["actions"][T:], jnp.zeros_like(trajectory["actions"][T:]))
-        np.testing.assert_array_equal(trajectory["rewards"][T:], jnp.zeros_like(trajectory["rewards"][T:]))
-        np.testing.assert_array_equal(trajectory["dones"][T:], jnp.zeros_like(trajectory["dones"][T:])) # Buffer is initialized with False
-        np.testing.assert_array_equal(trajectory["logprobs"][T:], jnp.zeros_like(trajectory["logprobs"][T:]))
-
-
-def test_run_selfplay_termination_done(env, mock_actor_critic, mock_params, rng):
-    """Tests if run_selfplay terminates when the environment is done."""
-    # Use a very small win length to force a quick game
-    quick_env = GomokuJaxEnv(B=TEST_BATCH_SIZE, board_size=TEST_BOARD_SIZE, win_length=2)
-    # Create a mock AC for this specific env
-    quick_mock_ac = MockActorCritic(quick_env)
-    # Use a buffer size guaranteed to be large enough
-    buffer_size = quick_env.board_size * quick_env.board_size
-
-    trajectory, _ = run_selfplay(quick_env, quick_mock_ac, mock_params, rng, buffer_size)
-
-    T = trajectory["T"]
-    assert T < buffer_size # Game should finish quickly
-
-    # Check that the last stored done flag corresponds to the step T-1
-    # The trajectory length T means steps 0 to T-1 were executed.
-    # The 'dones' buffer stores the done flag *after* the step.
-    # So, dones[T-1] should contain the terminal state for at least one env.
-    last_dones = trajectory["dones"][T - 1]
-    assert jnp.any(last_dones) # At least one game should be done at step T-1
-
-    # Check if all are done if T < buffer_size (while loop condition)
-    # If T < buffer_size, it implies the loop terminated because jnp.all(dones) was true.
-    if T < buffer_size:
-         assert jnp.all(last_dones)
-
-
-# No max_steps termination test needed as loop primarily terminates on done.
-# The buffer size check is just a safety measure.
-
-def test_run_selfplay_rng_update(env, mock_actor_critic, mock_params, rng):
-    """Tests if the PRNGKey is updated after run_selfplay."""
-    _, final_rng = run_selfplay(env, mock_actor_critic, mock_params, rng, TEST_BUFFER_SIZE)
-    assert not jnp.array_equal(rng, final_rng)
-
-    # Optional: run again and check RNG is different again
-    _, final_rng_2 = run_selfplay(env, mock_actor_critic, mock_params, final_rng, TEST_BUFFER_SIZE)
-    assert not jnp.array_equal(final_rng, final_rng_2)
-
+# ---- Tests for run_episode ----
 
 def test_run_episode_execution_and_shapes(env, mock_actor_critic, mock_params, rng):
     """Tests if run_episode executes and returns data with expected shapes for both players."""

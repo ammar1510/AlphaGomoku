@@ -24,6 +24,7 @@ class LoopState(NamedTuple):
     logprobs: jnp.ndarray
     step_idx: int
     rng: jax.random.PRNGKey
+    termination_step_indices: jnp.ndarray # Stores the step index 't' when done first becomes True for each batch element
 
 
 @partial(jit, static_argnames=["env", "actor_critic"])
@@ -50,6 +51,15 @@ def player_move(loop_state: LoopState, env: JaxEnvBase, actor_critic: Any, param
     rewards = loop_state.rewards.at[step_idx].set(step_rewards)
     dones_buffer = loop_state.dones.at[step_idx].set(dones)
 
+    # Update termination indices: if not already terminated and current step is done, record step_idx
+    current_termination_indices = loop_state.termination_step_indices
+    not_terminated_yet = (current_termination_indices == jnp.iinfo(jnp.int32).max)
+    new_termination_indices = jnp.where(
+        not_terminated_yet & dones,
+        step_idx, # Record current step index as termination step
+        current_termination_indices # Keep existing index (either max or previously recorded step)
+    )
+
     return loop_state._replace(
         state=next_state,
         obs=next_obs,
@@ -60,65 +70,66 @@ def player_move(loop_state: LoopState, env: JaxEnvBase, actor_critic: Any, param
         logprobs=logprobs,
         step_idx=step_idx + 1,
         rng=rng,
+        termination_step_indices=new_termination_indices, # Update termination indices
     )
 
 
-@partial(jax.jit, static_argnames=["env", "actor_critic", "buffer_size"])
-def run_selfplay(env: JaxEnvBase, actor_critic: Any, params: Any, rng: jax.random.PRNGKey, buffer_size: int) -> Tuple[Dict[str, Any], jax.random.PRNGKey]:
-    """
-    Collect complete trajectories until all games terminate.
-    Buffers are allocated based on buffer_size.
-
-    Args:
-        env: An instance of JaxEnvBase (e.g., GomokuJaxEnv).
-        actor_critic: ActorCritic model instance.
-        params: Model parameters.
-        rng: JAX random key.
-        buffer_size: The size of the trajectory buffers to allocate.
-
-    Returns:
-        trajectory: dict with collected data (obs, actions, rewards, dones, logprobs, T)
-                    The arrays have length buffer_size, T indicates valid steps.
-        rng: Updated random key
-    """
-    initial_rng, reset_rng = jax.random.split(rng)
-    initial_state, initial_obs, _ = env.reset(reset_rng)
-
-    buffers = env.initialize_trajectory_buffers(buffer_size)
-    observations, actions, rewards, dones_buffer, logprobs = buffers
-
-    initial_loop_state = LoopState(
-        state=initial_state,
-        obs=initial_obs,
-        observations=observations,
-        actions=actions,
-        rewards=rewards,
-        dones=dones_buffer,
-        logprobs=logprobs,
-        step_idx=0,
-        rng=initial_rng,
-    )
-
-    def cond_fn(l_state: LoopState) -> bool:
-        return ~jnp.all(l_state.state.dones)
-            
-
-    def body_fn(l_state: LoopState) -> LoopState:
-        return player_move(l_state, env, actor_critic, params)
-
-    final_loop_state = lax.while_loop(cond_fn, body_fn, initial_loop_state)
-
-    trajectory = {
-        "observations": final_loop_state.observations,
-        "actions": final_loop_state.actions,
-        "rewards": final_loop_state.rewards,
-        "dones": final_loop_state.dones,
-        "logprobs": final_loop_state.logprobs,
-        "T": final_loop_state.step_idx 
-    }
-    final_rng = final_loop_state.rng
-
-    return trajectory, final_rng
+# @partial(jax.jit, static_argnames=["env", "actor_critic", "buffer_size"])
+# def run_selfplay(env: JaxEnvBase, actor_critic: Any, params: Any, rng: jax.random.PRNGKey, buffer_size: int) -> Tuple[Dict[str, Any], jax.random.PRNGKey]:
+#     """
+#     Collect complete trajectories until all games terminate.
+#     Buffers are allocated based on buffer_size.
+#
+#     Args:
+#         env: An instance of JaxEnvBase (e.g., GomokuJaxEnv).
+#         actor_critic: ActorCritic model instance.
+#         params: Model parameters.
+#         rng: JAX random key.
+#         buffer_size: The size of the trajectory buffers to allocate.
+#
+#     Returns:
+#         trajectory: dict with collected data (obs, actions, rewards, dones, logprobs, T)
+#                     The arrays have length buffer_size, T indicates valid steps.
+#         rng: Updated random key
+#     """
+#     initial_rng, reset_rng = jax.random.split(rng)
+#     initial_state, initial_obs, _ = env.reset(reset_rng)
+#
+#     buffers = env.initialize_trajectory_buffers(buffer_size)
+#     observations, actions, rewards, dones_buffer, logprobs = buffers
+#
+#     initial_loop_state = LoopState(
+#         state=initial_state,
+#         obs=initial_obs,
+#         observations=observations,
+#         actions=actions,
+#         rewards=rewards,
+#         dones=dones_buffer,
+#         logprobs=logprobs,
+#         step_idx=0,
+#         rng=initial_rng,
+#     )
+#
+#     def cond_fn(l_state: LoopState) -> bool:
+#         return ~jnp.all(l_state.state.dones)
+#
+#
+#     def body_fn(l_state: LoopState) -> LoopState:
+#         return player_move(l_state, env, actor_critic, params)
+#
+#     final_loop_state = lax.while_loop(cond_fn, body_fn, initial_loop_state)
+#
+#     trajectory = {
+#         "observations": final_loop_state.observations,
+#         "actions": final_loop_state.actions,
+#         "rewards": final_loop_state.rewards,
+#         "dones": final_loop_state.dones,
+#         "logprobs": final_loop_state.logprobs,
+#         "T": final_loop_state.step_idx
+#     }
+#     final_rng = final_loop_state.rng
+#
+#     return trajectory, final_rng
 
 
 @partial(jax.jit, static_argnames=["env", "black_actor_critic", "white_actor_critic", "buffer_size"])
@@ -149,12 +160,17 @@ def run_episode(
         full_trajectory: Dict containing the full, un-sliced buffers (observations, actions, rewards, dones, logprobs).
                          Arrays have length buffer_size.
         rng: updated RNG key.
+
+    Note: This function can simulate the behavior of `run_selfplay` function
+          by passing the same actor_critic model and params for both the black and white players.
     """
     initial_rng, reset_rng = jax.random.split(rng)
     initial_state, initial_obs, _ = env.reset(reset_rng)
 
     buffers = env.initialize_trajectory_buffers(buffer_size)
     observations, actions, rewards, dones_buffer, logprobs = buffers
+    B = initial_obs.shape[0] # Infer batch size
+    initial_termination_indices = jnp.full((B,), jnp.iinfo(jnp.int32).max, dtype=jnp.int32)
 
     initial_loop_state = LoopState(
         state=initial_state,
@@ -166,6 +182,7 @@ def run_episode(
         logprobs=logprobs,
         step_idx=0,
         rng=initial_rng,
+        termination_step_indices=initial_termination_indices, # Initialize termination indices
     )
 
     def cond_fn(l_state: LoopState) -> bool:
@@ -199,13 +216,29 @@ def run_episode(
 
     final_state = lax.while_loop(cond_fn, body_fn_wrapped, initial_loop_state)
 
+    # Calculate valid mask from termination indices
+    term_indices = final_state.termination_step_indices # Shape (B,)
+    T = final_state.step_idx # Use actual steps taken up to buffer_size
+    B = initial_obs.shape[0]
+
+    # Ensure T is used correctly for the mask dimensions even if less than buffer_size
+    step_indices = jnp.arange(buffer_size)[:, None] # Shape (buffer_size, 1)
+
+    # Broadcast comparison: mask is True if step_index <= termination_index
+    # Using '<=' ensures the terminal step itself is included as valid
+    # We create a mask for the full buffer size
+    valid_mask = step_indices <= term_indices[None, :] # Shape (buffer_size, B)
+
     full_trajectory = {
-        "observations": final_state.observations,
-        "actions": final_state.actions,
-        "rewards": final_state.rewards,
-        "dones": final_state.dones,
-        "logprobs": final_state.logprobs,
-        "T": final_state.step_idx
+        # Use the full buffers
+        "observations": final_state.observations, # Shape (buffer_size, B, ...)
+        "actions": final_state.actions, # Shape (buffer_size, B, ...)
+        "rewards": final_state.rewards, # Shape (buffer_size, B)
+        "dones": final_state.dones, # Shape (buffer_size, B)
+        "logprobs": final_state.logprobs, # Shape (buffer_size, B)
+        "valid_mask": valid_mask, # Add the calculated mask, shape (buffer_size, B)
+        "T": T, # Actual number of steps executed (can be less than buffer_size)
+        "termination_step_indices": final_state.termination_step_indices, # Keep this too if needed elsewhere
     }
     rng = final_state.rng
 
@@ -226,35 +259,23 @@ def calculate_returns(rewards: jnp.ndarray, dones: jnp.ndarray, gamma: float) ->
     Returns:
         Discounted returns, shape (T, B).
     """
-    def scan_fn(carry, step_data):
-        reward, done = step_data
-        # Reset carry to 0 if the episode was done in the *previous* state.
-        # However, standard return calculation usually discounts through termination.
-        # Let's recalculate standard returns first. GAE handles termination explicitly.
-        # If GAE is used, returns might not be needed separately or calculated differently.
+    B = rewards.shape[1]
+    dones = dones.astype(jnp.float32) # Ensure float
 
-        # Standard Discounted Return:
-        # new_carry = reward + gamma * carry # Simple version
-        # Let's consider dones for GAE/value bootstrapping later.
-        # For simple returns, often we discount until the end.
-        # Alternative: Reset carry if *previous* step was done.
-        # Requires looking at dones shifted by one.
+    def scan_fn_batch(carry_batch, step_data_batch):
+        # carry_batch: shape (B,)
+        reward_batch, done_batch = step_data_batch
 
-        # Let's implement the standard cumulative discounted return:
-        # R_t = r_t + gamma * R_{t+1}
-        new_carry = reward + gamma * carry * (1.0 - done) # Reset return if current state is terminal
-        return new_carry, new_carry
+        new_carry_batch = reward_batch + gamma * carry_batch * (1.0 - done_batch)
 
-    # Scan over the time dimension (axis=0) for each batch element (vmap over axis=1)
-    def calculate_returns_single(r, d):
-        # Flip rewards and dones for reverse scan
-        step_data = (jnp.flip(r, axis=0), jnp.flip(d, axis=0))
-        _, discounted_reversed = lax.scan(scan_fn, 0.0, step_data)
-        # Flip back to original time order
-        return jnp.flip(discounted_reversed, axis=0)
+        return new_carry_batch, new_carry_batch
 
-    # Apply to each batch element
-    returns = jax.vmap(calculate_returns_single, in_axes=1, out_axes=1)(rewards, dones)
+    scan_inputs = (rewards, dones) # Structure: ((T, B), (T, B))
+
+    initial_carry = jnp.zeros(B) # Shape (B,)
+
+    _, returns = lax.scan(scan_fn_batch, initial_carry, scan_inputs, reverse=True)
+
     return returns
 
 
@@ -311,7 +332,8 @@ def calculate_gae(rewards: jnp.ndarray, values: jnp.ndarray, dones: jnp.ndarray,
     # Scan over axis 0 (time) in reverse.
     # Inputs structure ((T, B), (T, B)), step_data_batch will be ((B,), (B,))
     # Carry has shape (B,). Output ys will have shape (T, B).
-    # lax.scan with reverse=True returns outputs in the original order (0..T-1).
+    # lax.scan with reverse=True processes inputs from T-1 down to 0,
+    # but returns the collected outputs in the original order (0..T-1).
     _, advantages = lax.scan(scan_fn, initial_carry, scan_inputs, reverse=True)
 
     # Calculate returns: R_t = A_t + V(s_t)
