@@ -1,0 +1,20 @@
+# @package _group_
+
+# PPO Hyperparameters
+learning_rate: 0.0001    # Moved from train.yaml
+weight_decay: 0.0001     # Moved from train.yaml
+gamma: 0.99              # Discount factor (was 'discount' in train.yaml)
+gae_lambda: 0.95
+clip_eps: 0.2
+vf_coef: 0.5
+max_grad_norm: 1.0       # Gradient clipping norm (was 'grad_clip_norm' in train.yaml)
+update_epochs: 4
+num_minibatches: 4
+
+# Entropy Annealing (Moved from train.yaml)
+initial_entropy_coef: 0.1
+min_entropy_coef: 0.0001
+entropy_decay_steps: 50000
+
+# seed is defined in the main config
+# board_size is defined in the main config/env config 

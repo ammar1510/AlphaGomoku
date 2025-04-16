@@ -1,0 +1,5 @@
+# @package _group_
+
+name: "gomoku"
+board_size: 9
+win_length: 5 

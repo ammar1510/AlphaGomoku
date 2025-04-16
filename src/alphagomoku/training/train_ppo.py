@@ -1,0 +1,269 @@
+import jax
+import jax.numpy as jnp
+import optax
+import wandb
+import orbax.checkpoint as ocp
+import flax.linen as nn
+from flax.training import train_state
+import hydra
+from omegaconf import DictConfig, OmegaConf
+from typing import Dict, Any, Tuple, Optional
+import time
+import os
+from functools import partial
+
+from alphagomoku.environments.gomoku import GomokuJaxEnv, GomokuState
+from alphagomoku.models.gomoku.actor_critic import ActorCritic
+from alphagomoku.policy.ppo import PPOConfig, PPOTrainer
+from alphagomoku.training.rollout import run_episode, LoopState
+
+# --- Training State ---
+class TrainingState(train_state.TrainState):
+    # Inherits apply_fn, params, tx, opt_state
+    rng: jax.random.PRNGKey
+    update_step: int = 0
+
+# --- Helper Functions ---
+def flatten_batch(batch: Dict[str, jnp.ndarray], valid_mask: jnp.ndarray) -> Dict[str, jnp.ndarray]:
+    """Flattens (T, B, ...) arrays to (T*B, ...) and filters invalid steps."""
+    valid_mask_flat = valid_mask.reshape(-1) # (T*B,)
+
+    flat_batch = jax.tree_map(
+        lambda x: x.reshape(-1, *x.shape[2:]), # Flatten T and B dimensions
+        batch
+    )
+    # Filter based on the valid mask
+    filtered_batch = jax.tree_map(
+        lambda x: x[valid_mask_flat],
+        flat_batch
+    )
+    return filtered_batch
+
+# --- Main Training Function ---
+@hydra.main(config_path="../../config", config_name="config", version_base=None)
+def train(cfg: DictConfig):
+    """Runs the PPO training loop, configured by Hydra."""
+    print("Effective Hydra Configuration:")
+    print(OmegaConf.to_yaml(cfg))
+
+    # === Initialization ===
+    start_time = time.time()
+    output_dir = os.getcwd()
+    print(f"Hydra output directory: {output_dir}")
+
+    # WandB Setup
+    wandb_config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
+    run = wandb.init(
+        project=cfg.wandb.project,
+        entity=cfg.wandb.entity,
+        name=cfg.wandb.run_name,
+        config=wandb_config,
+        mode=cfg.wandb.mode,
+        dir=output_dir,
+        sync_tensorboard=True,
+        reinit=True
+    )
+    print(f"WandB Run URL: {run.get_url()}")
+
+    # RNG Setup
+    rng = jax.random.PRNGKey(cfg.seed)
+    rng, env_rng, model_rng, train_rng = jax.random.split(rng, 4)
+
+    # Environment Setup
+    env = GomokuJaxEnv(B=cfg.num_envs, board_size=cfg.env.board_size, win_length=cfg.env.win_length)
+
+    # Model Setup
+    model = ActorCritic(board_size=cfg.env.board_size)
+    dummy_obs = jnp.zeros((1, cfg.env.board_size, cfg.env.board_size)) # Single dummy obs for init
+    model_params = model.init(model_rng, dummy_obs)['params']
+
+    # Optimizer Setup
+    total_updates = cfg.total_timesteps // (cfg.rollout_length * cfg.num_envs)
+    lr_schedule = optax.linear_schedule(
+        init_value=cfg.ppo.learning_rate,
+        end_value=0.0, # Decay to zero
+        transition_steps=total_updates
+    )
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(cfg.ppo.max_grad_norm),
+        optax.adam(learning_rate=lr_schedule, eps=1e-5) # Use scheduled LR
+    )
+
+    # Training State Setup
+    tx = optimizer
+    train_state_instance = TrainingState.create(
+        apply_fn=model.apply,
+        params=model_params,
+        tx=tx,
+        rng=train_rng,
+        update_step=0
+    )
+
+    # PPO Trainer Setup
+    ppo_config = PPOConfig(
+        learning_rate=cfg.ppo.learning_rate,
+        clip_eps=cfg.ppo.clip_eps,
+        vf_coef=cfg.ppo.vf_coef,
+        entropy_coef=cfg.ppo.entropy_coef,
+        max_grad_norm=cfg.ppo.max_grad_norm,
+        gamma=cfg.ppo.gamma,
+        gae_lambda=cfg.ppo.gae_lambda,
+        update_epochs=cfg.ppo.update_epochs,
+        num_minibatches=cfg.ppo.num_minibatches,
+        seed=cfg.seed,
+        board_size=cfg.env.board_size
+    )
+    ppo_trainer = PPOTrainer(config=ppo_config)
+
+    # Checkpointing Setup
+    checkpoint_dir = os.path.join(output_dir, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    orbax_options = ocp.CheckpointManagerOptions(
+        save_interval_steps=cfg.checkpoint_interval,
+        max_to_keep=3
+    )
+    checkpointer = ocp.CheckpointManager(
+        directory=checkpoint_dir,
+        options=orbax_options
+    )
+
+    # --- Restore Checkpoint (Optional) ---
+    latest_step = checkpointer.latest_step()
+    if latest_step is not None:
+        print(f"Restoring checkpoint from step {latest_step}...")
+        restore_target = train_state_instance 
+        restored_state = checkpointer.restore(latest_step, args=ocp.args.StandardRestore(restore_target))
+        train_state_instance = restored_state
+        print(f"Restored state update step: {train_state_instance.update_step}")
+    else:
+        print("No checkpoint found, starting training from scratch.")
+
+
+    # --- Training Loop ---
+    num_updates = cfg.total_timesteps // (cfg.rollout_length * cfg.num_envs)
+    start_update = train_state_instance.update_step
+    print(f"Starting training from update {start_update} for {num_updates - start_update} more updates ({cfg.total_timesteps} total timesteps configured)...")
+
+    if start_update == 0:
+      env_state, current_obs, _ = env.reset(env_rng)
+    else:
+      print("Resuming run, resetting environment state.")
+      env_state, current_obs, _ = env.reset(env_rng)
+
+    for update in range(start_update, num_updates):
+        iter_start_time = time.time()
+        current_params = train_state_instance.params
+        current_rng = train_state_instance.rng # Use RNG from state
+
+        # === Rollout Phase ===
+        rollout_rng, current_rng = jax.random.split(current_rng)
+        full_trajectory, final_obs, current_rng = run_episode(
+            env=env,
+            black_actor_critic=model,
+            black_params=current_params,
+            white_actor_critic=model,
+            white_params=current_params,
+            rng=rollout_rng,
+            buffer_size=cfg.rollout_length,
+        )
+
+        # === GAE Calculation Phase ===
+        _, final_value_pred = model.apply({"params": current_params}, final_obs)
+        _, buffer_values_pred = jax.vmap(model.apply, in_axes=(None, 0))({"params": current_params}, full_trajectory["observations"])
+        all_values = jnp.concatenate([buffer_values_pred, final_value_pred[None, :]], axis=0)
+        advantages, returns = ppo_trainer.compute_gae_targets(
+            rewards=full_trajectory["rewards"],
+            values=all_values,
+            dones=full_trajectory["dones"],
+            gamma=cfg.ppo.gamma,
+            gae_lambda=cfg.ppo.gae_lambda,
+        )
+
+        # === Data Preparation Phase ===
+        batch_data = {
+            "observations": full_trajectory["observations"],
+            "actions": full_trajectory["actions"],
+            "logprobs_old": full_trajectory["logprobs"],
+            "advantages": advantages,
+            "returns": returns,
+            "valid_mask": full_trajectory["valid_mask"]
+        }
+        flat_batch = flatten_batch(batch_data, full_trajectory["valid_mask"])
+
+        # === Update Phase ===
+        update_rng, current_rng = jax.random.split(current_rng)
+        if flat_batch['observations'].shape[0] == 0:
+            print(f"Update {update+1}: Skipping update, empty batch after masking.")
+            update_metrics = {}
+            updated_params = current_params
+            updated_opt_state = train_state_instance.opt_state
+        else:
+            update_rng, updated_params, updated_opt_state, update_metrics = PPOTrainer.update_step(
+                rng=update_rng,
+                model_apply_fn=model.apply,
+                params=current_params,
+                opt_state=train_state_instance.opt_state,
+                optimizer=tx,
+                full_batch=flat_batch,
+                config=ppo_config,
+            )
+
+        # Update the training state
+        train_state_instance = train_state_instance.replace(
+            params=updated_params,
+            opt_state=updated_opt_state,
+            rng=current_rng,
+            update_step=update + 1
+        )
+
+        # === Logging Phase ===
+        iter_end_time = time.time()
+        steps_this_iter = cfg.rollout_length * cfg.num_envs
+        total_steps = (update + 1) * steps_this_iter
+        sps = steps_this_iter / (iter_end_time - iter_start_time) if iter_end_time > iter_start_time else 0
+
+        if update_metrics:
+            log_data = {
+                "train/update": update + 1,
+                "train/total_steps": total_steps,
+                "train/sps": sps,
+                "train/duration_s": iter_end_time - iter_start_time,
+                "ppo/total_loss": update_metrics.get("total_loss", jnp.nan),
+                "ppo/policy_loss": update_metrics.get("policy_loss", jnp.nan),
+                "ppo/value_loss": update_metrics.get("value_loss", jnp.nan),
+                "ppo/entropy": update_metrics.get("entropy", jnp.nan),
+                "ppo/approx_kl": update_metrics.get("approx_kl", jnp.nan),
+                "ppo/clip_fraction": update_metrics.get("clip_fraction", jnp.nan),
+                "ppo/mask_sum_fraction": update_metrics.get("mask_sum_fraction", jnp.nan),
+                "rollout/avg_episode_length": jnp.mean(jnp.where(full_trajectory["termination_step_indices"] != jnp.iinfo(jnp.int32).max, full_trajectory["termination_step_indices"], jnp.nan))
+            }
+            wandb.log(log_data, step=total_steps)
+        else:
+             log_data = {
+                "train/update": update + 1,
+                "train/total_steps": total_steps,
+                "train/sps": sps,
+                "train/duration_s": iter_end_time - iter_start_time,
+                "info/update_skipped": 1
+             }
+             wandb.log(log_data, step=total_steps)
+
+        # === Checkpointing Phase ===
+        current_update_step = train_state_instance.update_step
+        if current_update_step % cfg.checkpoint_interval == 0 and current_update_step > start_update:
+            print(f"Saving checkpoint at update {current_update_step} (total steps {total_steps})...")
+            save_args = ocp.args.StandardSave(train_state_instance)
+            checkpointer.save(current_update_step, args=save_args, force=True) 
+            print("Checkpoint saved.")
+
+    # --- Final Cleanup ---
+    print("Waiting for checkpointer...")
+    checkpointer.wait_until_finished()
+    checkpointer.close()
+    print("Closing WandB run...")
+    wandb.finish()
+    total_time = time.time() - start_time
+    print(f"Training finished in {total_time:.2f} seconds.")
+
+
+train() 
