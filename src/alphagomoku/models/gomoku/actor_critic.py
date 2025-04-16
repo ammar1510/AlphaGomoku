@@ -27,91 +27,103 @@ class ResidualBlock(nn.Module):
 
 class ActorCritic(nn.Module):
     board_size: int
-    channels: int = 1
+    channels: int = 2  # Now expects 2 channels: board state + player turn
 
     @nn.compact
-    def __call__(self, x: jnp.ndarray) -> Tuple[distrax.Categorical, jnp.ndarray]:
+    def __call__(self, x: jnp.ndarray, current_player: jnp.ndarray) -> Tuple[distrax.Categorical, jnp.ndarray]:
         """
         Forward pass through the network.
 
         Args:
             x (jnp.ndarray): The board state image with shape (..., board_size, board_size).
                              Allows for batched or unbatched input.
+            current_player (jnp.ndarray): Scalar or array indicating the current player
+                                          (-1 or 1) with shape (...). Must be broadcastable
+                                          to x's prefix shape.
 
         Returns:
-            pi (distrax.Categorical): Policy distribution over actions (flattened board).
+            pi (distrax.Categorical): Policy distribution over actions (..., flattened board).
             value (jnp.ndarray): Estimated state value with shape (...).
         """
-        # Store original shape prefix (e.g., (batch,) or (T, batch))
-        prefix_shape = x.shape[:-2]
-        board_shape = x.shape[-2:]
+        prefix_shape = x.shape[:-2] # e.g., (batch,) or (T, batch) or ()
+        board_shape = x.shape[-2:] # (board_size, board_size)
 
-        # Reshape input to (total_elements, board_size, board_size) for processing
-        x = x.reshape(-1, *board_shape)
+        # Add channel dimension for board state
+        # Shape: (..., board_size, board_size, 1)
+        x_proc = jnp.expand_dims(x, axis=-1)
 
-        # Add channel dimension if necessary
-        if x.shape[-1] != self.channels:
-            x = jnp.expand_dims(x, axis=-1)
-            if x.shape[-1] != self.channels:
-                 raise ValueError(f"Input shape {x.shape} incompatible with channels {self.channels}")
+        # Create player channel
+        # Ensure current_player has the correct prefix shape
+        player_array = jnp.broadcast_to(current_player, prefix_shape)
+        # Reshape player_array to (..., 1, 1, 1) for broadcasting to spatial dims
+        player_array_reshaped = player_array.reshape(prefix_shape + (1,) * (len(board_shape) + 1))
+        # Create the channel plane: (..., board_size, board_size, 1)
+        player_channel = jnp.ones_like(x_proc) * player_array_reshaped
 
+        # Concatenate board state and player channel
+        # Shape: (..., board_size, board_size, 2)
+        x_combined = jnp.concatenate([x_proc, player_channel], axis=-1)
+
+
+        # --- Network Layers --- Apply layers directly, preserving leading dimensions
 
         # Initial convolutional block
-        x = nn.Conv(features=64, kernel_size=(3, 3), padding="SAME")(x)
-        x = nn.LayerNorm()(x)
-        x = nn.relu(x)
+        # Input: (..., H, W, C_in=2), Output: (..., H, W, 64)
+        net = nn.Conv(features=64, kernel_size=(3, 3), padding="SAME")(x_combined)
+        net = nn.LayerNorm()(net) # Normalizes over the last axis (features)
+        net = nn.relu(net)
 
         # Residual blocks (×6)
+        # Input/Output: (..., H, W, 64)
         for _ in range(6):
-            x = ResidualBlock()(x)
+            net = ResidualBlock()(net)
 
-        # Actor Network (Policy Head)
-        policy = nn.Conv(features=32, kernel_size=(3, 3), padding="SAME")(x)
+        # --- Actor Head --- 
+        # Input: (..., H, W, 64), Output: (..., H, W, 32)
+        policy = nn.Conv(features=32, kernel_size=(3, 3), padding="SAME")(net)
         policy = nn.LayerNorm()(policy)
         policy = nn.relu(policy)
 
         # Final policy output
+        # Input: (..., H, W, 32), Output: (..., H, W, 1)
         policy_logits = nn.Conv(features=1, kernel_size=(1, 1))(policy)
-        # Shape: (total_elements, board_size, board_size, 1)
+        # Squeeze the channel dim: Output: (..., H, W)
         policy_logits = jnp.squeeze(policy_logits, axis=-1)
-        # Shape: (total_elements, board_size, board_size)
 
-        # Flatten logits for Categorical distribution
-        flat_policy_logits = policy_logits.reshape(policy_logits.shape[0], -1)
-        # Shape: (total_elements, board_size*board_size)
-
-        # Reshape flat logits back to original prefix shape
-        final_logits_shape = prefix_shape + (self.board_size * self.board_size,)
-        flat_policy_logits = flat_policy_logits.reshape(final_logits_shape)
-        # Shape: (..., board_size*board_size)
+        # Flatten spatial dimensions for Categorical distribution
+        # Input: (..., H, W), Output: (..., H*W)
+        flat_policy_logits = policy_logits.reshape(prefix_shape + (-1,))
 
         pi = distrax.Categorical(logits=flat_policy_logits)
 
-        # Critic Network (Value Head)
-        value = nn.Conv(features=32, kernel_size=(3, 3), padding="SAME")(x)
+        # --- Critic Head --- 
+        # Input: (..., H, W, 64), Output: (..., H, W, 32)
+        value = nn.Conv(features=32, kernel_size=(3, 3), padding="SAME")(net)
         value = nn.LayerNorm()(value)
         value = nn.relu(value)
 
-        # Global Average Pooling
-        value = jnp.mean(value, axis=(1, 2))  # Shape: (total_elements, 32)
+        # Global Average Pooling over spatial dimensions (H, W)
+        # Input: (..., H, W, 32), Output: (..., 32)
+        value = jnp.mean(value, axis=(-3, -2)) # Axes H, W are second and third from last
 
         # Fully connected layers
+        # Input: (..., 32), Output: (..., 256)
         value = nn.Dense(features=256)(value)
         value = nn.relu(value)
+        # Input: (..., 256), Output: (..., 64)
         value = nn.Dense(features=64)(value)
         value = nn.relu(value)
+        # Input: (..., 64), Output: (..., 1)
         value = nn.Dense(features=1)(value)
-        value = nn.tanh(value)  # Use tanh to constrain between -1 and 1
-        value = jnp.squeeze(value, axis=-1)  # Shape: (total_elements,)
-
-        # Reshape value back to original prefix shape
-        final_value_shape = prefix_shape
-        value = value.reshape(final_value_shape) # Shape: (...)
+        # Output: (..., 1)
+        value = nn.tanh(value) # Use tanh to constrain between -1 and 1
+        # Squeeze the last dim: Output: (...)
+        value = jnp.squeeze(value, axis=-1)
 
         return pi, value
 
     def evaluate_actions(
-        self, obs: jnp.ndarray, actions: jnp.ndarray
+        self, obs: jnp.ndarray, current_player: jnp.ndarray, actions: jnp.ndarray
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """
         Evaluate actions taken, providing log probabilities, entropy, and values.
@@ -119,6 +131,7 @@ class ActorCritic(nn.Module):
 
         Args:
             obs (jnp.ndarray): Observations (board states) with shape (..., board_size, board_size).
+            current_player (jnp.ndarray): Player (-1 or 1) corresponding to each observation, shape (...).
             actions (jnp.ndarray): Actions taken with shape (..., 2) representing (row, col).
                                   These should correspond to the observations.
 
@@ -129,7 +142,7 @@ class ActorCritic(nn.Module):
                    value: Estimated state value, shape (...).
         """
         # Get policy distribution and value estimate
-        pi, value = self(obs) # obs shape (..., board_size, board_size)
+        pi, value = self(obs, current_player) # Pass current_player
 
         # Convert (row, col) actions to flat indices for distrax
         # actions shape (..., 2)

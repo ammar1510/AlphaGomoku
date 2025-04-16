@@ -43,6 +43,7 @@ class PPOTrainer:
         self.config = config
 
     @staticmethod
+    @jax.jit
     def compute_gae_targets(
         rewards: jnp.ndarray,
         values: jnp.ndarray,
@@ -76,6 +77,7 @@ class PPOTrainer:
         return advantages_normalized, returns
 
     @staticmethod
+    @partial(jax.jit, static_argnums=(1, 4, 6))
     def update_step(
         rng: jax.random.PRNGKey,
         model_apply_fn: Callable,
@@ -111,9 +113,10 @@ class PPOTrainer:
             logprobs_old = minibatch["logprobs_old"]
             advantages = minibatch["advantages"]
             returns = minibatch["returns"]
+            current_players = minibatch["current_players"]
             valid_mask = minibatch["valid_mask"]
 
-            pi_new_dist, value_pred = model_apply_fn({"params": params}, obs)
+            pi_new_dist, value_pred = model_apply_fn({"params": params}, obs, current_players)
 
             logprobs_new = pi_new_dist.log_prob(actions)
             entropy = pi_new_dist.entropy()
