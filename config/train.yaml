@@ -1,21 +1,44 @@
-# Gomoku Training Configuration
+# @package _global_
 
-# Environment parameters
-board_size: 9
+defaults:
+  - _self_ # Ensures values in this file are loaded
+  - environment: gomoku/5x5 # Set the default environment config group
+  - ppo: default
+  - wandb: default # Assuming you have a config/wandb/default.yaml
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog
 
-# Training parameters
-num_boards : 256
-total_iterations: 1000000
+# Overall training configuration
+seed: 42
+
+# Training loop parameters
+num_envs: 256 # Number of parallel environments
+num_epochs: 1000        # Total number of PPO update epochs
 
 # Evaluation parameters
-#kept same as save_frequency
-eval_frequency: 50
-eval_games: 128
+eval_frequency: 50       # Evaluate every N epochs
+eval_games: 128          # Number of games to play during evaluation
 
-# Checkpointing
-save_frequency: 50
-checkpoint_dir: "checkpoints"
+# Checkpointing parameters
+save_frequency: 50       # Save checkpoint every N epochs
+checkpoint_dir: "checkpoints" # Relative to Hydra output dir
 max_checkpoints: 10
+
+# WandB configuration
+wandb:
+  project: "alphagomoku-ppo"
+  entity: ammar7 # Set your wandb entity here or via env var WANDB_ENTITY
+  run_name: null # If None, wandb generates one
+  mode: "online" # or "disabled"
+
+# Hydra specific configuration
+hydra:
+  run:
+    dir: ${oc.env:PWD}/artifacts/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${oc.env:PWD}/artifacts/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  output_subdir: .hydra # Disable the .hydra subdirectory
+
 # Miscellaneous
-seed: 42
 render: false

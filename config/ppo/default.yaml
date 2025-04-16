@@ -1,4 +1,4 @@
-# @package _group_
+# @package ppo
 
 # PPO Hyperparameters
 learning_rate: 0.0001    # Moved from train.yaml
