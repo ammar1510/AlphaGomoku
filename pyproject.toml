@@ -11,21 +11,24 @@ requires-python = ">=3.8"
 license = {text = "MIT"}
 dependencies = [
     "jax>=0.4.0",
-    "jaxlib>=0.4.0",
     "flax>=0.7.0", 
     "optax>=0.1.5",
     "numpy>=1.24.0",
     "pyyaml>=6.0.0",
     "matplotlib>=3.7.0",
     "orbax-checkpoint>=0.4.1",
+    "wandb>=0.16.0",
+    "hydra-core>=1.3.0",
+    "distrax>=0.1.5",
+    "tensorboard>=2.16.0",
 ]
 
 [project.urls]
 "Repository" = "https://github.com/ammar1510/alphagomoku"
 "Documentation" = "https://github.com/ammar1510/alphagomoku#readme"
 
-[tool.setuptools]
-packages = ["models", "env", "training", "utils"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [project.optional-dependencies]
 dev = [
