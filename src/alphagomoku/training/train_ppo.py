@@ -41,7 +41,7 @@ def flatten_batch(batch: Dict[str, jnp.ndarray], valid_mask: jnp.ndarray) -> Dic
     return filtered_batch
 
 # --- Main Training Function ---
-@hydra.main(config_path="../../config", config_name="train", version_base=None)
+@hydra.main(config_path="../../../config", config_name="train", version_base=None)
 def train(cfg: DictConfig):
     """Runs the PPO training loop, configured by Hydra."""
     print("Effective Hydra Configuration:")
@@ -71,14 +71,14 @@ def train(cfg: DictConfig):
     rng, env_rng, model_rng, train_rng = jax.random.split(rng, 4)
 
     # Environment Setup
-    env = GomokuJaxEnv(B=cfg.num_envs, board_size=cfg.environment.board_size, win_length=cfg.environment.win_length)
+    env = GomokuJaxEnv(B=cfg.num_envs, board_size=cfg.gomoku.board_size, win_length=cfg.gomoku.win_length)
 
     # Model Setup
     model = ActorCritic(board_size=cfg.environment.board_size)
     dummy_obs = jnp.zeros((1, cfg.environment.board_size, cfg.environment.board_size)) # Single dummy obs for init
     dummy_player = jnp.ones((1,), dtype=jnp.int32) # Use 1 as dummy player, shape (1,)
     model_params = model.init(model_rng, dummy_obs, dummy_player)['params']
-
+    
     # Optimizer Setup
     total_updates = cfg.num_epochs # LR decays over the number of epochs
     lr_schedule = optax.linear_schedule(
@@ -113,7 +113,7 @@ def train(cfg: DictConfig):
         update_epochs=cfg.ppo.update_epochs,
         num_minibatches=cfg.ppo.num_minibatches,
         seed=cfg.seed,
-        board_size=cfg.environment.board_size
+        board_size=cfg.gomoku.board_size
     )
     ppo_trainer = PPOTrainer(config=ppo_config)
 

@@ -2,11 +2,10 @@
 
 defaults:
   - _self_ # Ensures values in this file are loaded
-  - environment: gomoku/5x5 # Set the default environment config group
+  - gomoku: 5x5 # Correct path to gomoku config group
   - ppo: default
-  - wandb: default # Assuming you have a config/wandb/default.yaml
-  - override hydra/job_logging: colorlog
-  - override hydra/hydra_logging: colorlog
+  - override hydra/job_logging: default
+  - override hydra/hydra_logging: default
 
 # Overall training configuration
 seed: 42
