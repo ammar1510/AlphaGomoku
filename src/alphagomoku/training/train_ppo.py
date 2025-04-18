@@ -76,7 +76,8 @@ def train(cfg: DictConfig):
     # Model Setup
     model = ActorCritic(board_size=cfg.environment.board_size)
     dummy_obs = jnp.zeros((1, cfg.environment.board_size, cfg.environment.board_size)) # Single dummy obs for init
-    model_params = model.init(model_rng, dummy_obs)['params']
+    dummy_player = jnp.ones((1,), dtype=jnp.int32) # Use 1 as dummy player, shape (1,)
+    model_params = model.init(model_rng, dummy_obs, dummy_player)['params']
 
     # Optimizer Setup
     total_updates = cfg.num_epochs # LR decays over the number of epochs
