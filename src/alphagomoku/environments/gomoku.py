@@ -35,7 +35,7 @@ WIN_KERNELS_DN = ("NHWC", "HWIO", "NHWC")
 class GomokuState(NamedTuple):
     """Holds the dynamic state of the batched Gomoku environment."""
     boards: jnp.ndarray           # (B, board_size, board_size) float32 tensor
-    current_player: jnp.ndarray   # (B,) int32 tensor (1 or -1)
+    current_players: jnp.ndarray   # (B,) int32 tensor (1 or -1)
     dones: jnp.ndarray            # (B,) bool tensor
     winners: jnp.ndarray          # (B,) int32 tensor (1, -1, or 0 for draw/ongoing)
     rng: jax.random.PRNGKey       # JAX PRNGKey
@@ -44,9 +44,6 @@ class GomokuState(NamedTuple):
 class GomokuJaxEnv(JaxEnvBase):
     """
     Functional JAX-based Gomoku environment logic container.
-
-    Holds static configuration and provides pure functions for state transitions.
-    Dynamic state is managed externally using the GomokuState NamedTuple.
     Observations are player agnostic, representing the board state 1 for black and -1 for white.
 
     Static Attributes:
@@ -85,7 +82,7 @@ class GomokuJaxEnv(JaxEnvBase):
         """
         return GomokuState(
             boards=jnp.zeros((B, board_size, board_size), dtype=jnp.float32),
-            current_player=jnp.ones((B,), dtype=jnp.int32),
+            current_players=jnp.ones((B,), dtype=jnp.int32),
             dones=jnp.zeros((B,), dtype=jnp.bool_),
             winners=jnp.zeros((B,), dtype=jnp.int32),
             rng=rng
@@ -93,20 +90,20 @@ class GomokuJaxEnv(JaxEnvBase):
 
     @staticmethod
     @partial(jax.jit, static_argnames=('win_length',))
-    def _check_win(board: jnp.ndarray, current_player: jnp.ndarray, win_length: int) -> jnp.ndarray:
+    def _check_win(board: jnp.ndarray, current_players: jnp.ndarray, win_length: int) -> jnp.ndarray:
         """
         Check for wins using convolution. Pure function.
 
         Args:
             board: Game boards (B, H, W).
-            current_player: Current player values (B,).
+            current_players: Current player values (B,).
             win_length: Number of pieces needed for a win.
 
         Returns:
             wins: Boolean array (B,) indicating wins for the current player.
         """
-        current_player_reshaped = current_player[:, None, None] # (B, 1, 1)
-        player_boards = (board == current_player_reshaped).astype(jnp.float32) # (B, H, W)
+        current_players_reshaped = current_players[:, None, None] # (B, 1, 1)
+        player_boards = (board == current_players_reshaped).astype(jnp.float32) # (B, H, W)
 
         player_boards_nhwc = player_boards[:, :, :, None] # (B, H, W, 1)
 
@@ -139,23 +136,23 @@ class GomokuJaxEnv(JaxEnvBase):
         rows, cols = actions[:, 0], actions[:, 1]
 
         current_boards = state.boards
-        current_player = state.current_player
+        current_players = state.current_players
         current_dones = state.dones
         current_winners = state.winners
         current_rng = state.rng
 
         # make a move 
         valid_move = (current_boards[jnp.arange(B), rows, cols] == 0) & (~current_dones)
-        current_player_placing = current_player * valid_move.astype(jnp.int32)
+        current_player_placing = current_players * valid_move.astype(jnp.int32)
         new_boards = current_boards.at[jnp.arange(B), rows, cols].set(
              current_boards[jnp.arange(B), rows, cols] + current_player_placing
         )
 
         # check for win
-        win_patterns = GomokuJaxEnv._check_win(new_boards, current_player, self.win_length)
+        win_patterns = GomokuJaxEnv._check_win(new_boards, current_players, self.win_length)
         current_wins = win_patterns & (~current_dones)
 
-        new_winners = jnp.where(current_wins, current_player, current_winners)
+        new_winners = jnp.where(current_wins, current_players, current_winners)
 
         # check for draw
         board_full = jnp.all(new_boards != 0, axis=(1, 2))
@@ -168,14 +165,14 @@ class GomokuJaxEnv(JaxEnvBase):
 
         # switch player
         switch_player = valid_move & (~new_dones)
-        next_player = jnp.where(switch_player, -current_player, current_player)
+        next_players = jnp.where(switch_player, -current_players, current_players)
 
         # observations are player agnostic, representing the board state 1 for black and -1 for white.
         observations = new_boards 
 
         new_state = GomokuState(
             boards=new_boards,
-            current_player=next_player,
+            current_players=next_players,
             dones=new_dones,
             winners=new_winners,
             rng=current_rng
@@ -226,11 +223,11 @@ class GomokuJaxEnv(JaxEnvBase):
         rewards = jnp.zeros((max_steps, self.B), dtype=jnp.float32)
         dones = jnp.zeros((max_steps, self.B), dtype=jnp.bool_)
         log_probs = jnp.zeros((max_steps, self.B), dtype=jnp.float32)
-        current_players = jnp.zeros((max_steps, self.B), dtype=jnp.int32)
+        current_players_buffer = jnp.zeros((max_steps, self.B), dtype=jnp.int32)
         # Could potentially add value estimates here too if needed by the algorithm
         # values = jnp.zeros((max_steps, self.B), dtype=jnp.float32)
 
-        return observations, actions, rewards, dones, log_probs, current_players
+        return observations, actions, rewards, dones, log_probs, current_players_buffer
 
     # Properties match base class (still using @property for convenience)
     @property

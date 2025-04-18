@@ -32,7 +32,7 @@ class TestFunctionalGomoku(unittest.TestCase):
 
         # Check environment structure
         self.assertIn("boards", env_state)
-        self.assertIn("current_player", env_state)
+        self.assertIn("current_players", env_state)
         self.assertIn("dones", env_state)
         self.assertIn("winners", env_state)
         self.assertIn("board_size", env_state)
@@ -44,13 +44,13 @@ class TestFunctionalGomoku(unittest.TestCase):
             env_state["boards"].shape,
             (self.B, self.board_size, self.board_size),
         )
-        self.assertEqual(env_state["current_player"].shape, (self.B,))
+        self.assertEqual(env_state["current_players"].shape, (self.B,))
         self.assertEqual(env_state["dones"].shape, (self.B,))
         self.assertEqual(env_state["winners"].shape, (self.B,))
 
         # Check initial values
         self.assertTrue(np.all(env_state["boards"] == 0))
-        self.assertTrue(np.all(env_state["current_player"] == 1))
+        self.assertTrue(np.all(env_state["current_players"] == 1))
         self.assertTrue(np.all(env_state["dones"] == False))
         self.assertTrue(np.all(env_state["winners"] == 0))
         self.assertEqual(env_state["board_size"], self.board_size)
@@ -64,7 +64,7 @@ class TestFunctionalGomoku(unittest.TestCase):
         # Modify state
         new_board = env_state["boards"].at[0, 0, 0].set(1)
         env_state["boards"] = new_board
-        env_state["current_player"] = env_state["current_player"].at[0].set(-1)
+        env_state["current_players"] = env_state["current_players"].at[0].set(-1)
         env_state["dones"] = env_state["dones"].at[0].set(True)
 
         # Reset environment
@@ -73,7 +73,7 @@ class TestFunctionalGomoku(unittest.TestCase):
 
         # Check if reset properly
         self.assertTrue(np.all(new_env_state["boards"] == 0))
-        self.assertTrue(np.all(new_env_state["current_player"] == 1))
+        self.assertTrue(np.all(new_env_state["current_players"] == 1))
         self.assertTrue(np.all(new_env_state["dones"] == False))
         self.assertTrue(np.all(new_env_state["winners"] == 0))
 
@@ -92,7 +92,7 @@ class TestFunctionalGomoku(unittest.TestCase):
             env_state["boards"] = env_state["boards"].at[0, 4, i].set(1)
 
         # Check for wins
-        wins = check_win(env_state["boards"], env_state["current_player"])
+        wins = check_win(env_state["boards"], env_state["current_players"])
 
         # First board should have a win, others should not
         self.assertTrue(wins[0])
@@ -107,7 +107,7 @@ class TestFunctionalGomoku(unittest.TestCase):
             env_state["boards"] = env_state["boards"].at[1, i, 4].set(1)
 
         # Check for wins
-        wins = check_win(env_state["boards"], env_state["current_player"])
+        wins = check_win(env_state["boards"], env_state["current_players"])
 
         # Second board should have a win, others should not
         self.assertFalse(wins[0])
@@ -123,7 +123,7 @@ class TestFunctionalGomoku(unittest.TestCase):
             env_state["boards"] = env_state["boards"].at[2, i, i].set(1)
 
         # Check for wins
-        wins = check_win(env_state["boards"], env_state["current_player"])
+        wins = check_win(env_state["boards"], env_state["current_players"])
 
         # Third board should have a win, others should not
         self.assertFalse(wins[0])
@@ -142,7 +142,7 @@ class TestFunctionalGomoku(unittest.TestCase):
             )
 
         # Check for wins
-        wins = check_win(env_state["boards"], env_state["current_player"])
+        wins = check_win(env_state["boards"], env_state["current_players"])
 
         # Fourth board should have a win, others should not
         self.assertFalse(wins[0])
@@ -203,7 +203,7 @@ class TestFunctionalGomoku(unittest.TestCase):
         self.assertEqual(new_env_state["boards"][3, 4, 5], 1)  # Fourth board, player 1
 
         # Check if player switched
-        self.assertTrue(np.all(new_env_state["current_player"] == -1))
+        self.assertTrue(np.all(new_env_state["current_players"] == -1))
 
         # Check if no wins yet
         self.assertTrue(np.all(new_env_state["winners"] == 0))
@@ -236,7 +236,7 @@ class TestFunctionalGomoku(unittest.TestCase):
         )  # Fourth board, player -1
 
         # Check if player switched back
-        self.assertTrue(np.all(newer_env_state["current_player"] == 1))
+        self.assertTrue(np.all(newer_env_state["current_players"] == 1))
 
     def test_step_env_win(self):
         """Test winning scenario in step_env."""

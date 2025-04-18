@@ -23,22 +23,6 @@ class TrainingState(train_state.TrainState):
     rng: jax.random.PRNGKey
     update_step: int = 0
 
-# --- Helper Functions ---
-@jax.jit
-def flatten_batch(batch: Dict[str, jnp.ndarray], valid_mask: jnp.ndarray) -> Dict[str, jnp.ndarray]:
-    """Flattens (T, B, ...) arrays to (T*B, ...) and filters invalid steps."""
-    valid_mask_flat = valid_mask.reshape(-1) # (T*B,)
-
-    flat_batch = jax.tree_map(
-        lambda x: x.reshape(-1, *x.shape[2:]), # Flatten T and B dimensions
-        batch
-    )
-    # Filter based on the valid mask
-    filtered_batch = jax.tree_map(
-        lambda x: x[valid_mask_flat],
-        flat_batch
-    )
-    return filtered_batch
 
 # --- Main Training Function ---
 @hydra.main(config_path="../../../config", config_name="train", version_base=None)
@@ -74,8 +58,8 @@ def train(cfg: DictConfig):
     env = GomokuJaxEnv(B=cfg.num_envs, board_size=cfg.gomoku.board_size, win_length=cfg.gomoku.win_length)
 
     # Model Setup
-    model = ActorCritic(board_size=cfg.environment.board_size)
-    dummy_obs = jnp.zeros((1, cfg.environment.board_size, cfg.environment.board_size)) # Single dummy obs for init
+    model = ActorCritic(board_size=cfg.gomoku.board_size)
+    dummy_obs = jnp.zeros((1, cfg.gomoku.board_size, cfg.gomoku.board_size)) # Single dummy obs for init
     dummy_player = jnp.ones((1,), dtype=jnp.int32) # Use 1 as dummy player, shape (1,)
     model_params = model.init(model_rng, dummy_obs, dummy_player)['params']
     
@@ -83,12 +67,12 @@ def train(cfg: DictConfig):
     total_updates = cfg.num_epochs # LR decays over the number of epochs
     lr_schedule = optax.linear_schedule(
         init_value=cfg.ppo.learning_rate,
-        end_value=cfg.ppo.learning_rate * 0.1, # Decay to 10% of initial LR
+        end_value=cfg.ppo.learning_rate * cfg.ppo.lr_decay_factor, # Use configurable decay factor
         transition_steps=total_updates
     )
     optimizer = optax.chain(
         optax.clip_by_global_norm(cfg.ppo.max_grad_norm),
-        optax.adam(learning_rate=lr_schedule, eps=1e-5) # Use scheduled LR
+        optax.adam(learning_rate=lr_schedule, eps=cfg.ppo.adam_eps) # Use configurable epsilon
     )
 
     # Training State Setup
@@ -112,8 +96,7 @@ def train(cfg: DictConfig):
         gae_lambda=cfg.ppo.gae_lambda,
         update_epochs=cfg.ppo.update_epochs,
         num_minibatches=cfg.ppo.num_minibatches,
-        seed=cfg.seed,
-        board_size=cfg.gomoku.board_size
+       seed=cfg.seed
     )
     ppo_trainer = PPOTrainer(config=ppo_config)
 
@@ -175,7 +158,7 @@ def train(cfg: DictConfig):
             white_actor_critic=model,
             white_params=current_params,
             rng=rollout_rng,
-            # buffer_size=cfg.rollout_length, # Updated run_episode uses dynamic size
+            buffer_size=cfg.gomoku.board_size * cfg.gomoku.board_size # Set buffer size
         )
 
         # Determine actual steps this iteration based on the valid mask
@@ -185,10 +168,10 @@ def train(cfg: DictConfig):
 
         # === GAE Calculation Phase ===
         # Get final observation and player from the final EnvState
-        final_obs = final_env_state.observation
-        final_player = final_env_state.current_player
+        final_obs = final_env_state.boards
+        final_players = final_env_state.current_players
         # Get value for the final state
-        _, final_value_pred = model.apply({"params": current_params}, final_obs, final_player)
+        _, final_value_pred = model.apply({"params": current_params}, final_obs, final_players)
         # Get values for all states in the buffer
         _, buffer_values_pred = jax.vmap(model.apply, in_axes=(None, 0, 0))({"params": current_params}, full_trajectory["observations"], full_trajectory["current_players"])
         # Concatenate buffer values and final value
@@ -211,25 +194,18 @@ def train(cfg: DictConfig):
             "current_players": full_trajectory["current_players"], # Add players to batch
             "valid_mask": full_trajectory["valid_mask"],
         }
-        flat_batch = flatten_batch(batch_data, full_trajectory["valid_mask"])
 
         # === Update Phase ===
         update_rng, current_rng = jax.random.split(current_rng)
-        if flat_batch['observations'].shape[0] == 0:
-            print(f"Epoch {epoch+1}: Skipping update, empty batch after masking.")
-            update_metrics = {}
-            updated_params = current_params
-            updated_opt_state = train_state_instance.opt_state
-        else:
-            update_rng, updated_params, updated_opt_state, update_metrics = PPOTrainer.update_step(
-                rng=update_rng,
-                model_apply_fn=model.apply,
-                params=current_params,
-                opt_state=train_state_instance.opt_state,
-                optimizer=tx,
-                full_batch=flat_batch,
-                config=ppo_config,
-            )
+        update_rng, updated_params, updated_opt_state, update_metrics = PPOTrainer.update_step(
+            rng=update_rng,
+            model_apply_fn=model.apply,
+            params=current_params,
+            opt_state=train_state_instance.opt_state,
+            optimizer=tx,
+            full_batch=batch_data, 
+            config=ppo_config,
+        )
 
         # Update the training state
         train_state_instance = train_state_instance.replace(
@@ -241,8 +217,6 @@ def train(cfg: DictConfig):
 
         # === Logging Phase ===
         iter_end_time = time.time()
-        # steps_this_iter = cfg.rollout_length * cfg.num_envs # Steps are now variable
-        # total_steps = (epoch + 1) * steps_this_iter # Total steps are now cumulative
         sps = steps_this_iter / (iter_end_time - iter_start_time) if iter_end_time > iter_start_time and steps_this_iter > 0 else 0
 
         if update_metrics:

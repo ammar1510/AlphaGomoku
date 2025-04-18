@@ -30,14 +30,14 @@ class ActorCritic(nn.Module):
     channels: int = 2  # Now expects 2 channels: board state + player turn
 
     @nn.compact
-    def __call__(self, x: jnp.ndarray, current_player: jnp.ndarray) -> Tuple[distrax.Categorical, jnp.ndarray]:
+    def __call__(self, x: jnp.ndarray, current_players: jnp.ndarray) -> Tuple[distrax.Categorical, jnp.ndarray]:
         """
         Forward pass through the network.
 
         Args:
             x (jnp.ndarray): The board state image with shape (..., board_size, board_size).
                              Allows for batched or unbatched input.
-            current_player (jnp.ndarray): Scalar or array indicating the current player
+            current_players (jnp.ndarray): Scalar or array indicating the current player(s)
                                           (-1 or 1) with shape (...). Must be broadcastable
                                           to x's prefix shape.
 
@@ -53,8 +53,8 @@ class ActorCritic(nn.Module):
         x_proc = jnp.expand_dims(x, axis=-1)
 
         # Create player channel
-        # Ensure current_player has the correct prefix shape
-        player_array = jnp.broadcast_to(current_player, prefix_shape)
+        # Ensure current_players has the correct prefix shape
+        player_array = jnp.broadcast_to(current_players, prefix_shape)
         # Reshape player_array to (..., 1, 1, 1) for broadcasting to spatial dims
         player_array_reshaped = player_array.reshape(prefix_shape + (1,) * (len(board_shape) + 1))
         # Create the channel plane: (..., board_size, board_size, 1)
@@ -123,7 +123,7 @@ class ActorCritic(nn.Module):
         return pi, value
 
     def evaluate_actions(
-        self, obs: jnp.ndarray, current_player: jnp.ndarray, actions: jnp.ndarray
+        self, obs: jnp.ndarray, current_players: jnp.ndarray, actions: jnp.ndarray
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """
         Evaluate actions taken, providing log probabilities, entropy, and values.
@@ -131,7 +131,7 @@ class ActorCritic(nn.Module):
 
         Args:
             obs (jnp.ndarray): Observations (board states) with shape (..., board_size, board_size).
-            current_player (jnp.ndarray): Player (-1 or 1) corresponding to each observation, shape (...).
+            current_players (jnp.ndarray): Player (-1 or 1) corresponding to each observation, shape (...).
             actions (jnp.ndarray): Actions taken with shape (..., 2) representing (row, col).
                                   These should correspond to the observations.
 
@@ -142,7 +142,7 @@ class ActorCritic(nn.Module):
                    value: Estimated state value, shape (...).
         """
         # Get policy distribution and value estimate
-        pi, value = self(obs, current_player) # Pass current_player
+        pi, value = self(obs, current_players) # Pass renamed argument
 
         # Convert (row, col) actions to flat indices for distrax
         # actions shape (..., 2)

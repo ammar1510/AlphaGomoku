@@ -2,7 +2,9 @@
 
 # PPO Hyperparameters
 learning_rate: 0.0001    # Moved from train.yaml
+lr_decay_factor: 0.1     # Factor to multiply initial LR by for final LR in schedule
 weight_decay: 0.0001     # Moved from train.yaml
+adam_eps: 1e-5           # Epsilon for Adam optimizer
 gamma: 0.99              # Discount factor (was 'discount' in train.yaml)
 gae_lambda: 0.95
 clip_eps: 0.2
@@ -11,10 +13,8 @@ max_grad_norm: 1.0       # Gradient clipping norm (was 'grad_clip_norm' in train
 update_epochs: 4
 num_minibatches: 4
 
-# Entropy Annealing (Moved from train.yaml)
-initial_entropy_coef: 0.1
-min_entropy_coef: 0.0001
-entropy_decay_steps: 50000
+# Entropy Coefficient
+entropy_coef: 0.1
 
 # seed is defined in the main config
 # board_size is defined in the main config/env config 

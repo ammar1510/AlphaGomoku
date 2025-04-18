@@ -34,14 +34,14 @@ def player_move(loop_state: LoopState, env: JaxEnvBase, actor_critic: Any, param
     """Takes a single step in the environment using the provided actor-critic."""
     current_state: EnvState = loop_state.state
     current_obs: jnp.ndarray = loop_state.obs
-    current_player: jnp.ndarray = current_state.current_player # Get current player
+    current_players: jnp.ndarray = current_state.current_players # Renamed access and variable
     step_idx: int = loop_state.step_idx
     rng = loop_state.rng
 
     # Get policy distribution and value from the model
-    pi_dist, _ = actor_critic.apply({"params": params}, current_obs, current_player) # Pass current_player
+    pi_dist, _ = actor_critic.apply({"params": params}, current_obs, current_players) # Pass renamed variable
 
-    # Get action mask from the environment 
+    # Get action mask from the environment
     action_mask = env.get_action_mask(current_state) # (B, H, W)
     B, H, W = action_mask.shape
     flat_action_mask = action_mask.reshape(B, -1) # (B, H*W)
@@ -68,7 +68,8 @@ def player_move(loop_state: LoopState, env: JaxEnvBase, actor_critic: Any, param
     observations = loop_state.observations.at[step_idx].set(current_obs)
     actions = loop_state.actions.at[step_idx].set(action) # Store the (row, col) action
     logprobs = loop_state.logprobs.at[step_idx].set(logprob)
-    current_players = loop_state.current_players.at[step_idx].set(current_player) # Store current player
+    # Use renamed local variable here
+    current_players_buffer_updated = loop_state.current_players.at[step_idx].set(current_players)
 
     next_state, next_obs, step_rewards, dones, info = env.step(current_state, action)
 
@@ -92,7 +93,7 @@ def player_move(loop_state: LoopState, env: JaxEnvBase, actor_critic: Any, param
         rewards=rewards,
         dones=dones_buffer,
         logprobs=logprobs,
-        current_players=current_players, # Store updated players buffer
+        current_players=current_players_buffer_updated, # Use the updated buffer variable
         step_idx=step_idx + 1,
         rng=rng,
         termination_step_indices=new_termination_indices, # Update termination indices
@@ -222,10 +223,6 @@ def run_episode(
         white_actor_critic: Any, white_params: Any
     ) -> LoopState:
         current_step = l_state.step_idx
-        # Check current player from state - more robust than step index if env handles turns
-        # Assuming player 1 is black, player -1 is white
-        # is_black_turn = l_state.state.current_player == 1 # Check single element if needed jnp.all(l_state["state"].current_player == 1) ? Requires env state structure knowledge
-        # Simpler approach using step index assuming strict alternation:
         is_black_turn = (current_step % 2 == 0)
 
         return jax.lax.cond(

@@ -9,7 +9,7 @@ from alphagomoku.models.gomoku.actor_critic import ActorCritic
 from alphagomoku.training.rollout import calculate_gae
 
 
-@dataclass
+@dataclass(frozen=True)
 class PPOConfig:
     """Configuration for PPO algorithm."""
 
@@ -23,7 +23,6 @@ class PPOConfig:
     update_epochs: int = 4
     num_minibatches: int = 4
     seed: int = 42
-    board_size: int = 15
 
 
 class PPOTrainer:
@@ -116,50 +115,54 @@ class PPOTrainer:
             current_players = minibatch["current_players"]
             valid_mask = minibatch["valid_mask"]
 
-            pi_new_dist, value_pred = model_apply_fn({"params": params}, obs, current_players)
+            # --- Get new policy distribution, value, logprobs, and entropy ---
+            # Use the evaluate_actions method which handles action conversion
+            logprobs_new, entropy, value_new = model_apply_fn(
+                {"params": params}, obs, current_players, actions, method=model_apply_fn.evaluate_actions
+            )
+            # ---
 
-            logprobs_new = pi_new_dist.log_prob(actions)
-            entropy = pi_new_dist.entropy()
+            # Ensure mask is boolean for 'where'
+            bool_mask = valid_mask.astype(bool)
+            mask_sum = jnp.sum(valid_mask) 
 
+            # --- Value Loss (MSE) - Masked Mean using jnp.mean(where=...) ---
+            value_loss_unmasked = (value_new - returns) ** 2
+            value_loss = jnp.mean(value_loss_unmasked, where=bool_mask)
+
+            # --- Policy Loss - Masked Mean using jnp.mean(where=...) ---
             log_ratio = logprobs_new - logprobs_old
             ratio = jnp.exp(log_ratio)
-
             pg_loss1 = advantages * ratio
             pg_loss2 = advantages * jnp.clip(ratio, 1.0 - config.clip_eps, 1.0 + config.clip_eps)
-            # policy_loss = -jnp.minimum(pg_loss1, pg_loss2).mean()
             policy_loss_unmasked = -jnp.minimum(pg_loss1, pg_loss2)
-            # Masked mean: sum only valid elements, divide by count of valid elements
-            mask_sum = jnp.sum(valid_mask)
-            policy_loss = jnp.sum(policy_loss_unmasked * valid_mask) / jnp.maximum(mask_sum, 1.0)
+            policy_loss = jnp.mean(policy_loss_unmasked, where=bool_mask)
 
-            # value_loss = 0.5 * jnp.square(value_pred - returns).mean()
-            value_loss_unmasked = 0.5 * jnp.square(value_pred - returns)
-            value_loss = jnp.sum(value_loss_unmasked * valid_mask) / jnp.maximum(mask_sum, 1.0)
-
-            # entropy_bonus = -entropy.mean()
+            # --- Entropy Loss - Masked Mean using jnp.mean(where=...) ---
             entropy_bonus_unmasked = -entropy
-            entropy_bonus = jnp.sum(entropy_bonus_unmasked * valid_mask) / jnp.maximum(mask_sum, 1.0)
+            entropy_bonus = jnp.mean(entropy_bonus_unmasked, where=bool_mask)
 
             total_loss = (policy_loss +
-                          config.vf_coef * value_loss +
+                          config.vf_coef * value_loss + # Apply vf_coef here
                           config.entropy_coef * entropy_bonus)
 
-            # approx_kl = jnp.mean((ratio - 1.0) - log_ratio)
+            # --- Approximate KL Divergence - Masked Mean using jnp.mean(where=...) ---
             approx_kl_unmasked = (ratio - 1.0) - log_ratio
-            approx_kl = jnp.sum(approx_kl_unmasked * valid_mask) / jnp.maximum(mask_sum, 1.0)
+            approx_kl = jnp.mean(approx_kl_unmasked, where=bool_mask)
 
-            # clip_fraction = jnp.mean(jnp.abs(ratio - 1.0) > config.clip_eps)
+            # --- Clip Fraction - Masked Mean using jnp.mean(where=...) ---
+            # Need to cast boolean clip fraction to float for mean
             clip_fraction_unmasked = (jnp.abs(ratio - 1.0) > config.clip_eps)
-            clip_fraction = jnp.sum(clip_fraction_unmasked * valid_mask) / jnp.maximum(mask_sum, 1.0)
+            clip_fraction = jnp.mean(clip_fraction_unmasked.astype(jnp.float32), where=bool_mask)
 
             metrics = {
-                "total_loss": total_loss, # Already uses masked components
+                "total_loss": total_loss,
                 "policy_loss": policy_loss,
                 "value_loss": value_loss,
-                "entropy": -entropy_bonus, # Use the masked entropy bonus
+                "entropy": -entropy_bonus,
                 "approx_kl": approx_kl,
                 "clip_fraction": clip_fraction,
-                "mask_sum_fraction": mask_sum / valid_mask.size # Optional: track how much data is valid
+                "mask_sum_fraction": mask_sum / valid_mask.size # Re-added metric
             }
             return total_loss, metrics
 
@@ -207,7 +210,7 @@ class PPOTrainer:
 
                 mb_indices = shuffled_indices[start_idx:end_idx]
 
-                mini_batch = jax.tree_map(lambda x: x[mb_indices], full_batch)
+                mini_batch = jax.tree.map(lambda x: x[mb_indices], full_batch)
 
                 params, opt_state, step_metrics = _update_minibatch(
                     params, opt_state, optimizer, model_apply_fn, mini_batch
