@@ -3,16 +3,18 @@ import jax.numpy as jnp
 from jax import lax, jit
 from functools import partial
 from typing import Dict, Any, Tuple, NamedTuple
-import distrax # Added import
+import distrax  # Added import
 
 # Import the base environment class and the type hint for state
 from alphagomoku.environments.base import JaxEnvBase, EnvState
+
 # Import the specific Gomoku environment state if needed for type hinting,
 # but the functions should ideally work with any EnvState.
 # from alphagomoku.environments.gomoku import GomokuState
 
 # Assume actor_critic model has methods: apply, sample_action, log_prob
 # These would typically be defined elsewhere (e.g., in a network module)
+
 
 # Define the LoopState NamedTuple
 class LoopState(NamedTuple):
@@ -23,31 +25,39 @@ class LoopState(NamedTuple):
     rewards: jnp.ndarray
     dones: jnp.ndarray
     logprobs: jnp.ndarray
-    current_players: jnp.ndarray # Added buffer for current player
+    current_players: jnp.ndarray  # Added buffer for current player
     step_idx: int
     rng: jax.random.PRNGKey
-    termination_step_indices: jnp.ndarray # Stores the step index 't' when done first becomes True for each batch element
+    termination_step_indices: (
+        jnp.ndarray
+    )  # Stores the step index 't' when done first becomes True for each batch element
 
 
 @partial(jit, static_argnames=["env", "actor_critic"])
-def player_move(loop_state: LoopState, env: JaxEnvBase, actor_critic: Any, params: Any) -> LoopState:
+def player_move(
+    loop_state: LoopState, env: JaxEnvBase, actor_critic: Any, params: Any
+) -> LoopState:
     """Takes a single step in the environment using the provided actor-critic."""
     current_state: EnvState = loop_state.state
     current_obs: jnp.ndarray = loop_state.obs
-    current_players: jnp.ndarray = current_state.current_players # Renamed access and variable
+    current_players: jnp.ndarray = (
+        current_state.current_players
+    )  # Renamed access and variable
     step_idx: int = loop_state.step_idx
     rng = loop_state.rng
 
     # Get policy distribution and value from the model
-    pi_dist, _ = actor_critic.apply({"params": params}, current_obs, current_players) # Pass renamed variable
+    pi_dist, _ = actor_critic.apply(
+        {"params": params}, current_obs, current_players
+    )  # Pass renamed variable
 
     # Get action mask from the environment
-    action_mask = env.get_action_mask(current_state) # (B, H, W)
+    action_mask = env.get_action_mask(current_state)  # (B, H, W)
     B, H, W = action_mask.shape
-    flat_action_mask = action_mask.reshape(B, -1) # (B, H*W)
+    flat_action_mask = action_mask.reshape(B, -1)  # (B, H*W)
 
     # Get original logits from the distribution
-    original_logits = pi_dist.logits # Shape (B, H*W)
+    original_logits = pi_dist.logits  # Shape (B, H*W)
 
     # Apply the mask to the logits
     masked_logits = jnp.where(flat_action_mask, original_logits, -jnp.inf)
@@ -57,19 +67,21 @@ def player_move(loop_state: LoopState, env: JaxEnvBase, actor_critic: Any, param
 
     # Sample action from the masked distribution
     rng, subkey = jax.random.split(rng)
-    flat_action = masked_pi_dist.sample(seed=subkey) # Shape (B,)
-    logprob = masked_pi_dist.log_prob(flat_action)   # Shape (B,)
+    flat_action = masked_pi_dist.sample(seed=subkey)  # Shape (B,)
+    logprob = masked_pi_dist.log_prob(flat_action)  # Shape (B,)
 
     # Convert flat action back to (row, col) for the environment step
     action_row = flat_action // W
     action_col = flat_action % W
-    action = jnp.stack([action_row, action_col], axis=-1) # Shape (B, 2)
+    action = jnp.stack([action_row, action_col], axis=-1)  # Shape (B, 2)
 
     observations = loop_state.observations.at[step_idx].set(current_obs)
-    actions = loop_state.actions.at[step_idx].set(action) # Store the (row, col) action
+    actions = loop_state.actions.at[step_idx].set(action)  # Store the (row, col) action
     logprobs = loop_state.logprobs.at[step_idx].set(logprob)
     # Use renamed local variable here
-    current_players_buffer_updated = loop_state.current_players.at[step_idx].set(current_players)
+    current_players_buffer_updated = loop_state.current_players.at[step_idx].set(
+        current_players
+    )
 
     next_state, next_obs, step_rewards, dones, info = env.step(current_state, action)
 
@@ -78,11 +90,11 @@ def player_move(loop_state: LoopState, env: JaxEnvBase, actor_critic: Any, param
 
     # Update termination indices: if not already terminated and current step is done, record step_idx
     current_termination_indices = loop_state.termination_step_indices
-    not_terminated_yet = (current_termination_indices == jnp.iinfo(jnp.int32).max)
+    not_terminated_yet = current_termination_indices == jnp.iinfo(jnp.int32).max
     new_termination_indices = jnp.where(
         not_terminated_yet & dones,
-        step_idx, # Record current step index as termination step
-        current_termination_indices # Keep existing index (either max or previously recorded step)
+        step_idx,  # Record current step index as termination step
+        current_termination_indices,  # Keep existing index (either max or previously recorded step)
     )
 
     return loop_state._replace(
@@ -93,10 +105,10 @@ def player_move(loop_state: LoopState, env: JaxEnvBase, actor_critic: Any, param
         rewards=rewards,
         dones=dones_buffer,
         logprobs=logprobs,
-        current_players=current_players_buffer_updated, # Use the updated buffer variable
+        current_players=current_players_buffer_updated,  # Use the updated buffer variable
         step_idx=step_idx + 1,
         rng=rng,
-        termination_step_indices=new_termination_indices, # Update termination indices
+        termination_step_indices=new_termination_indices,  # Update termination indices
     )
 
 
@@ -158,7 +170,10 @@ def player_move(loop_state: LoopState, env: JaxEnvBase, actor_critic: Any, param
 #     return trajectory, final_rng
 
 
-@partial(jax.jit, static_argnames=["env", "black_actor_critic", "white_actor_critic", "buffer_size"])
+@partial(
+    jax.jit,
+    static_argnames=["env", "black_actor_critic", "white_actor_critic", "buffer_size"],
+)
 def run_episode(
     env: JaxEnvBase,
     black_actor_critic: Any,
@@ -166,8 +181,10 @@ def run_episode(
     white_actor_critic: Any,
     white_params: Any,
     rng: jax.random.PRNGKey,
-    buffer_size: int
-) -> Tuple[Dict[str, Any], EnvState, jax.random.PRNGKey]: # Return full buffers, final_state, rng
+    buffer_size: int,
+) -> Tuple[
+    Dict[str, Any], EnvState, jax.random.PRNGKey
+]:  # Return full buffers, final_state, rng
     """
     Collect trajectories for self-play with separate black and white models.
     Runs until all environments are done.
@@ -195,9 +212,13 @@ def run_episode(
     initial_state, initial_obs, _ = env.reset(reset_rng)
 
     buffers = env.initialize_trajectory_buffers(buffer_size)
-    observations, actions, rewards, dones_buffer, logprobs, current_players_buffer = buffers # Unpack players buffer
-    B = initial_obs.shape[0] # Infer batch size
-    initial_termination_indices = jnp.full((B,), jnp.iinfo(jnp.int32).max, dtype=jnp.int32)
+    observations, actions, rewards, dones_buffer, logprobs, current_players_buffer = (
+        buffers  # Unpack players buffer
+    )
+    B = initial_obs.shape[0]  # Infer batch size
+    initial_termination_indices = jnp.full(
+        (B,), jnp.iinfo(jnp.int32).max, dtype=jnp.int32
+    )
 
     initial_loop_state = LoopState(
         state=initial_state,
@@ -207,10 +228,10 @@ def run_episode(
         rewards=rewards,
         dones=dones_buffer,
         logprobs=logprobs,
-        current_players=current_players_buffer, # Add player buffer
+        current_players=current_players_buffer,  # Add player buffer
         step_idx=0,
         rng=initial_rng,
-        termination_step_indices=initial_termination_indices, # Initialize termination indices
+        termination_step_indices=initial_termination_indices,  # Initialize termination indices
     )
 
     def cond_fn(l_state: LoopState) -> bool:
@@ -218,12 +239,15 @@ def run_episode(
 
     @partial(jit, static_argnames=["env", "black_actor_critic", "white_actor_critic"])
     def body_fn_alternating(
-        l_state: LoopState, env: JaxEnvBase,
-        black_actor_critic: Any, black_params: Any,
-        white_actor_critic: Any, white_params: Any
+        l_state: LoopState,
+        env: JaxEnvBase,
+        black_actor_critic: Any,
+        black_params: Any,
+        white_actor_critic: Any,
+        white_params: Any,
     ) -> LoopState:
         current_step = l_state.step_idx
-        is_black_turn = (current_step % 2 == 0)
+        is_black_turn = current_step % 2 == 0
 
         return jax.lax.cond(
             is_black_turn,
@@ -235,35 +259,40 @@ def run_episode(
     def body_fn_wrapped(l_state: LoopState) -> LoopState:
         # Pass static args explicitly if needed by jit context, or rely on closure
         return body_fn_alternating(
-            l_state, env, black_actor_critic, black_params, white_actor_critic, white_params
+            l_state,
+            env,
+            black_actor_critic,
+            black_params,
+            white_actor_critic,
+            white_params,
         )
 
     final_state = lax.while_loop(cond_fn, body_fn_wrapped, initial_loop_state)
 
     # Calculate valid mask from termination indices
-    term_indices = final_state.termination_step_indices # Shape (B,)
-    T = final_state.step_idx # Use actual steps taken up to buffer_size
+    term_indices = final_state.termination_step_indices  # Shape (B,)
+    T = final_state.step_idx  # Use actual steps taken up to buffer_size
     B = initial_obs.shape[0]
 
     # Ensure T is used correctly for the mask dimensions even if less than buffer_size
-    step_indices = jnp.arange(buffer_size)[:, None] # Shape (buffer_size, 1)
+    step_indices = jnp.arange(buffer_size)[:, None]  # Shape (buffer_size, 1)
 
     # Broadcast comparison: mask is True if step_index <= termination_index
     # Using '<=' ensures the terminal step itself is included as valid
     # We create a mask for the full buffer size
-    valid_mask = step_indices <= term_indices[None, :] # Shape (buffer_size, B)
+    valid_mask = step_indices <= term_indices[None, :]  # Shape (buffer_size, B)
 
     full_trajectory = {
         # Use the full buffers
-        "observations": final_state.observations, # Shape (buffer_size, B, ...)
-        "actions": final_state.actions, # Shape (buffer_size, B, ...)
-        "rewards": final_state.rewards, # Shape (buffer_size, B)
-        "dones": final_state.dones, # Shape (buffer_size, B)
-        "logprobs": final_state.logprobs, # Shape (buffer_size, B)
-        "current_players": final_state.current_players, # Add stored players
-        "valid_mask": valid_mask, # Add the calculated mask, shape (buffer_size, B)
-        "T": T, # Actual number of steps executed (can be less than buffer_size)
-        "termination_step_indices": final_state.termination_step_indices, # Keep this too if needed elsewhere
+        "observations": final_state.observations,  # Shape (buffer_size, B, ...)
+        "actions": final_state.actions,  # Shape (buffer_size, B, ...)
+        "rewards": final_state.rewards,  # Shape (buffer_size, B)
+        "dones": final_state.dones,  # Shape (buffer_size, B)
+        "logprobs": final_state.logprobs,  # Shape (buffer_size, B)
+        "current_players": final_state.current_players,  # Add stored players
+        "valid_mask": valid_mask,  # Add the calculated mask, shape (buffer_size, B)
+        "T": T,  # Actual number of steps executed (can be less than buffer_size)
+        "termination_step_indices": final_state.termination_step_indices,  # Keep this too if needed elsewhere
     }
     rng = final_state.rng
 
@@ -273,7 +302,9 @@ def run_episode(
 
 # --- Utility functions for GAE/Returns (remain the same, check types) ---
 @jax.jit
-def calculate_returns(rewards: jnp.ndarray, dones: jnp.ndarray, gamma: float) -> jnp.ndarray:
+def calculate_returns(
+    rewards: jnp.ndarray, dones: jnp.ndarray, gamma: float
+) -> jnp.ndarray:
     """
     Calculate discounted returns for batched trajectories.
 
@@ -286,7 +317,7 @@ def calculate_returns(rewards: jnp.ndarray, dones: jnp.ndarray, gamma: float) ->
         Discounted returns, shape (T, B).
     """
     B = rewards.shape[1]
-    dones = dones.astype(jnp.float32) # Ensure float
+    dones = dones.astype(jnp.float32)  # Ensure float
 
     def scan_fn_batch(carry_batch, step_data_batch):
         # carry_batch: shape (B,)
@@ -296,18 +327,23 @@ def calculate_returns(rewards: jnp.ndarray, dones: jnp.ndarray, gamma: float) ->
 
         return new_carry_batch, new_carry_batch
 
-    scan_inputs = (rewards, dones) # Structure: ((T, B), (T, B))
+    scan_inputs = (rewards, dones)  # Structure: ((T, B), (T, B))
 
-    initial_carry = jnp.zeros(B) # Shape (B,)
+    initial_carry = jnp.zeros(B)  # Shape (B,)
 
     _, returns = lax.scan(scan_fn_batch, initial_carry, scan_inputs, reverse=True)
 
     return returns
 
 
-
 @jax.jit
-def calculate_gae(rewards: jnp.ndarray, values: jnp.ndarray, dones: jnp.ndarray, gamma: float = 0.99, gae_lambda: float = 0.95) -> jnp.ndarray:
+def calculate_gae(
+    rewards: jnp.ndarray,
+    values: jnp.ndarray,
+    dones: jnp.ndarray,
+    gamma: float = 0.99,
+    gae_lambda: float = 0.95,
+) -> jnp.ndarray:
     """
     Compute Generalized Advantage Estimation (GAE) using lax.scan directly on batched data.
 
@@ -324,17 +360,25 @@ def calculate_gae(rewards: jnp.ndarray, values: jnp.ndarray, dones: jnp.ndarray,
     """
     T = rewards.shape[0]
     B = rewards.shape[1]
-    assert values.shape[0] == T + 1, f"Values should have shape ({T+1}, B), but got {values.shape}"
-    assert values.shape[1] == B, f"Values batch dimension mismatch: {values.shape[1]} vs {B}"
-    assert dones.shape[0] == T, f"Dones time dimension mismatch: {dones.shape[0]} vs {T}"
-    assert dones.shape[1] == B, f"Dones batch dimension mismatch: {dones.shape[1]} vs {B}"
+    assert (
+        values.shape[0] == T + 1
+    ), f"Values should have shape ({T+1}, B), but got {values.shape}"
+    assert (
+        values.shape[1] == B
+    ), f"Values batch dimension mismatch: {values.shape[1]} vs {B}"
+    assert (
+        dones.shape[0] == T
+    ), f"Dones time dimension mismatch: {dones.shape[0]} vs {T}"
+    assert (
+        dones.shape[1] == B
+    ), f"Dones batch dimension mismatch: {dones.shape[1]} vs {B}"
 
-    values_t = values[:-1] # V(s_0)...V(s_{T-1}), shape (T, B)
-    values_tp1 = values[1:] # V(s_1)...V(s_T), shape (T, B)
-    dones = dones.astype(jnp.float32) # Ensure float, shape (T, B)
+    values_t = values[:-1]  # V(s_0)...V(s_{T-1}), shape (T, B)
+    values_tp1 = values[1:]  # V(s_1)...V(s_T), shape (T, B)
+    dones = dones.astype(jnp.float32)  # Ensure float, shape (T, B)
 
     # Calculate deltas: delta_t = r_t + gamma * V(s_{t+1}) * (1 - d_t) - V(s_t)
-    deltas = rewards - gamma * values_tp1 * (1.0 - dones) - values_t # Shape (T, B)
+    deltas = rewards - gamma * values_tp1 * (1.0 - dones) - values_t  # Shape (T, B)
 
     def scan_fn(carry_gae_batch, step_data_batch):
         # carry_gae_batch: shape (B,)
@@ -343,17 +387,19 @@ def calculate_gae(rewards: jnp.ndarray, values: jnp.ndarray, dones: jnp.ndarray,
 
         # Calculate GAE for the batch: A_t = delta_t + gamma * lambda * A_{t+1} * (1 - d_t)
         # All operations are element-wise across the batch dimension.
-        gae_batch = delta_batch + gamma * gae_lambda * (1.0 - done_batch) * carry_gae_batch # Shape (B,)
+        gae_batch = (
+            delta_batch + gamma * gae_lambda * (1.0 - done_batch) * carry_gae_batch
+        )  # Shape (B,)
 
         # Return the new carry (current GAE) and the value to store (also current GAE)
         return gae_batch, gae_batch
 
     # Prepare inputs for scan over time axis (0)
     # Scan operates on the leading dimension T.
-    scan_inputs = (deltas, dones) # Structure: ((T, B), (T, B))
+    scan_inputs = (deltas, dones)  # Structure: ((T, B), (T, B))
 
     # Initial carry state for the scan needs to match the batch dimension
-    initial_carry = jnp.zeros(B) # Shape (B,)
+    initial_carry = jnp.zeros(B)  # Shape (B,)
 
     # Scan over axis 0 (time) in reverse.
     # Inputs structure ((T, B), (T, B)), step_data_batch will be ((B,), (B,))
@@ -363,9 +409,10 @@ def calculate_gae(rewards: jnp.ndarray, values: jnp.ndarray, dones: jnp.ndarray,
     _, advantages = lax.scan(scan_fn, initial_carry, scan_inputs, reverse=True)
 
     # Calculate returns: R_t = A_t + V(s_t)
-    returns = advantages + values_t # Shape (T, B)
+    returns = advantages + values_t  # Shape (T, B)
 
     return advantages, returns
+
 
 # Keep the old GAE implementation commented out for reference if needed
 # @jax.jit

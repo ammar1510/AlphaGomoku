@@ -30,7 +30,9 @@ class ActorCritic(nn.Module):
     channels: int = 2  # Now expects 2 channels: board state + player turn
 
     @nn.compact
-    def __call__(self, x: jnp.ndarray, current_players: jnp.ndarray) -> Tuple[distrax.Categorical, jnp.ndarray]:
+    def __call__(
+        self, x: jnp.ndarray, current_players: jnp.ndarray
+    ) -> Tuple[distrax.Categorical, jnp.ndarray]:
         """
         Forward pass through the network.
 
@@ -45,8 +47,8 @@ class ActorCritic(nn.Module):
             pi (distrax.Categorical): Policy distribution over actions (..., flattened board).
             value (jnp.ndarray): Estimated state value with shape (...).
         """
-        prefix_shape = x.shape[:-2] # e.g., (batch,) or (T, batch) or ()
-        board_shape = x.shape[-2:] # (board_size, board_size)
+        prefix_shape = x.shape[:-2]  # e.g., (batch,) or (T, batch) or ()
+        board_shape = x.shape[-2:]  # (board_size, board_size)
 
         # Add channel dimension for board state
         # Shape: (..., board_size, board_size, 1)
@@ -56,7 +58,9 @@ class ActorCritic(nn.Module):
         # Ensure current_players has the correct prefix shape
         player_array = jnp.broadcast_to(current_players, prefix_shape)
         # Reshape player_array to (..., 1, 1, 1) for broadcasting to spatial dims
-        player_array_reshaped = player_array.reshape(prefix_shape + (1,) * (len(board_shape) + 1))
+        player_array_reshaped = player_array.reshape(
+            prefix_shape + (1,) * (len(board_shape) + 1)
+        )
         # Create the channel plane: (..., board_size, board_size, 1)
         player_channel = jnp.ones_like(x_proc) * player_array_reshaped
 
@@ -64,13 +68,12 @@ class ActorCritic(nn.Module):
         # Shape: (..., board_size, board_size, 2)
         x_combined = jnp.concatenate([x_proc, player_channel], axis=-1)
 
-
         # --- Network Layers --- Apply layers directly, preserving leading dimensions
 
         # Initial convolutional block
         # Input: (..., H, W, C_in=2), Output: (..., H, W, 64)
         net = nn.Conv(features=64, kernel_size=(3, 3), padding="SAME")(x_combined)
-        net = nn.LayerNorm()(net) # Normalizes over the last axis (features)
+        net = nn.LayerNorm()(net)  # Normalizes over the last axis (features)
         net = nn.relu(net)
 
         # Residual blocks (×6)
@@ -78,7 +81,7 @@ class ActorCritic(nn.Module):
         for _ in range(6):
             net = ResidualBlock()(net)
 
-        # --- Actor Head --- 
+        # --- Actor Head ---
         # Input: (..., H, W, 64), Output: (..., H, W, 32)
         policy = nn.Conv(features=32, kernel_size=(3, 3), padding="SAME")(net)
         policy = nn.LayerNorm()(policy)
@@ -96,7 +99,7 @@ class ActorCritic(nn.Module):
 
         pi = distrax.Categorical(logits=flat_policy_logits)
 
-        # --- Critic Head --- 
+        # --- Critic Head ---
         # Input: (..., H, W, 64), Output: (..., H, W, 32)
         value = nn.Conv(features=32, kernel_size=(3, 3), padding="SAME")(net)
         value = nn.LayerNorm()(value)
@@ -104,7 +107,9 @@ class ActorCritic(nn.Module):
 
         # Global Average Pooling over spatial dimensions (H, W)
         # Input: (..., H, W, 32), Output: (..., 32)
-        value = jnp.mean(value, axis=(-3, -2)) # Axes H, W are second and third from last
+        value = jnp.mean(
+            value, axis=(-3, -2)
+        )  # Axes H, W are second and third from last
 
         # Fully connected layers
         # Input: (..., 32), Output: (..., 256)
@@ -116,7 +121,7 @@ class ActorCritic(nn.Module):
         # Input: (..., 64), Output: (..., 1)
         value = nn.Dense(features=1)(value)
         # Output: (..., 1)
-        value = nn.tanh(value) # Use tanh to constrain between -1 and 1
+        value = nn.tanh(value)  # Use tanh to constrain between -1 and 1
         # Squeeze the last dim: Output: (...)
         value = jnp.squeeze(value, axis=-1)
 
@@ -142,7 +147,7 @@ class ActorCritic(nn.Module):
                    value: Estimated state value, shape (...).
         """
         # Get policy distribution and value estimate
-        pi, value = self(obs, current_players) # Pass renamed argument
+        pi, value = self(obs, current_players)  # Pass renamed argument
 
         # Convert (row, col) actions to flat indices for distrax
         # actions shape (..., 2)
@@ -150,9 +155,9 @@ class ActorCritic(nn.Module):
         # flat_actions shape (...)
 
         # Calculate log probability of the taken actions
-        log_prob = pi.log_prob(flat_actions) # log_prob shape (...)
+        log_prob = pi.log_prob(flat_actions)  # log_prob shape (...)
 
         # Calculate entropy of the policy distribution
-        entropy = pi.entropy() # entropy shape (...)
+        entropy = pi.entropy()  # entropy shape (...)
 
-        return log_prob, entropy, value 
+        return log_prob, entropy, value

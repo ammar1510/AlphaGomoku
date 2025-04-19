@@ -5,7 +5,8 @@ from typing import Tuple, Dict, Any, Type, Optional, TypeVar
 
 # Placeholder TypeVar for the environment-specific state (e.g., GomokuState)
 # Subclasses will define their own specific state type, likely a NamedTuple or dataclass.
-EnvState = TypeVar('EnvState')
+EnvState = TypeVar("EnvState")
+
 
 class JaxEnvBase(abc.ABC):
     """
@@ -31,13 +32,15 @@ class JaxEnvBase(abc.ABC):
             **env_specific_config: Environment-specific static configuration arguments
                                      (e.g., board_size, win_length).
         """
-        self.B = B # Store batch size, often needed by logic functions
+        self.B = B  # Store batch size, often needed by logic functions
         # Subclass implementation should store necessary static config from
         # env_specific_config as attributes of `self`.
         super().__init__()
 
     @abc.abstractmethod
-    def step(self, state: EnvState, actions: jnp.ndarray) -> Tuple[EnvState, jnp.ndarray, jnp.ndarray, jnp.ndarray, Dict[str, Any]]:
+    def step(
+        self, state: EnvState, actions: jnp.ndarray
+    ) -> Tuple[EnvState, jnp.ndarray, jnp.ndarray, jnp.ndarray, Dict[str, Any]]:
         """
         Applies actions to the current state to compute the next state and outputs. Pure function.
 
@@ -57,7 +60,9 @@ class JaxEnvBase(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def reset(self, rng: jax.random.PRNGKey) -> Tuple[EnvState, jnp.ndarray, Dict[str, Any]]:
+    def reset(
+        self, rng: jax.random.PRNGKey
+    ) -> Tuple[EnvState, jnp.ndarray, Dict[str, Any]]:
         """
         Creates an initial environment state. Pure function.
 
@@ -101,7 +106,6 @@ class JaxEnvBase(abc.ABC):
     def action_shape(self) -> tuple:
         """Returns the shape tuple of a single action (excluding batch dim)."""
         raise NotImplementedError
-
 
     # --- Optional Methods ---
 

@@ -11,15 +11,15 @@ defaults:
 seed: 42
 
 # Training loop parameters
-num_envs: 512 # Number of parallel environments
-num_epochs: 1000        # Total number of PPO update epochs
+num_envs: 1024 # Number of parallel environments
+num_epochs: 8000        # Total number of PPO update epochs
 
 # Evaluation parameters
-eval_frequency: 50       # Evaluate every N epochs
+eval_frequency: 100       # Evaluate every N epochs
 eval_games: 128          # Number of games to play during evaluation
 
 # Checkpointing parameters
-save_frequency: 50       # Save checkpoint every N epochs
+save_frequency: 100       # Save checkpoint every N epochs
 checkpoint_dir: "checkpoints" # Relative to Hydra output dir
 max_checkpoints: 10
 

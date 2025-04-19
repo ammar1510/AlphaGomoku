@@ -66,35 +66,41 @@ class PPOTrainer:
                    - normalized_advantages: Normalized GAE estimates, shape (T, B) or (T,).
                    - returns: Target values for the value function, shape (T, B) or (T,).
         """
-        advantages_raw, returns = calculate_gae(rewards, values, dones, gamma, gae_lambda)
+        advantages_raw, returns = calculate_gae(
+            rewards, values, dones, gamma, gae_lambda
+        )
 
         # Normalize advantages over the batch
         advantages_mean = advantages_raw.mean()
-        advantages_std = advantages_raw.std() + 1e-8 # Add epsilon for numerical stability
+        advantages_std = (
+            advantages_raw.std() + 1e-8
+        )  # Add epsilon for numerical stability
         advantages_normalized = (advantages_raw - advantages_mean) / advantages_std
 
         return advantages_normalized, returns
 
     @staticmethod
-    @partial(jax.jit, static_argnums=(1, 4, 6))
+    @partial(jax.jit, static_argnums=(1, 3, 6))
     def update_step(
         rng: jax.random.PRNGKey,
-        model_apply_fn: Callable,
+        model: ActorCritic,
         params: optax.Params,
-        opt_state: optax.OptState,
         optimizer: optax.GradientTransformation,
+        opt_state: optax.OptState,
         full_batch: Dict[str, jnp.ndarray],
         config: PPOConfig,
-    ) -> Tuple[jax.random.PRNGKey, optax.Params, optax.OptState, Dict[str, jnp.ndarray]]:
+    ) -> Tuple[
+        jax.random.PRNGKey, optax.Params, optax.OptState, Dict[str, jnp.ndarray]
+    ]:
         """
         Perform PPO updates for a single agent over multiple epochs using mini-batches.
 
         Args:
             rng: JAX random key.
-            model_apply_fn: The model's apply function (e.g., `model.apply`).
+            model: The ActorCritic model instance.
             params: Current model parameters.
-            opt_state: Current optimizer state.
             optimizer: The Optax optimizer.
+            opt_state: Current optimizer state.
             full_batch: Preprocessed batch data containing keys like
                          'observations', 'actions', 'logprobs_old', 'advantages', 'returns'.
                          Data should be shaped (N, ...) where N is the total number of steps.
@@ -105,7 +111,9 @@ class PPOTrainer:
             tuple: (updated_rng, updated_params, updated_opt_state, metrics averaged over epochs).
         """
 
-        def loss_fn(params: optax.Params, minibatch: Dict[str, jnp.ndarray]) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
+        def loss_fn(
+            params: optax.Params, minibatch: Dict[str, jnp.ndarray]
+        ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
             """Calculates the PPO loss and metrics for one mini-batch."""
             obs = minibatch["observations"]
             actions = minibatch["actions"]
@@ -116,44 +124,52 @@ class PPOTrainer:
             valid_mask = minibatch["valid_mask"]
 
             # --- Get new policy distribution, value, logprobs, and entropy ---
-            # Use the evaluate_actions method which handles action conversion
-            logprobs_new, entropy, value_new = model_apply_fn(
-                {"params": params}, obs, current_players, actions, method=model_apply_fn.evaluate_actions
+            # Use the evaluate_actions method via model.apply
+            logprobs_new, entropy, value_new = model.apply(
+                {"params": params},
+                obs,
+                current_players,
+                actions,
+                method=model.evaluate_actions,
             )
             # ---
 
-            # Ensure mask is boolean for 'where'
-            bool_mask = valid_mask.astype(bool)
-            mask_sum = jnp.sum(valid_mask) 
+            mask_sum = jnp.sum(valid_mask)
 
             # --- Value Loss (MSE) - Masked Mean using jnp.mean(where=...) ---
             value_loss_unmasked = (value_new - returns) ** 2
-            value_loss = jnp.mean(value_loss_unmasked, where=bool_mask)
+            value_loss = jnp.mean(value_loss_unmasked, where=valid_mask)
 
             # --- Policy Loss - Masked Mean using jnp.mean(where=...) ---
             log_ratio = logprobs_new - logprobs_old
             ratio = jnp.exp(log_ratio)
             pg_loss1 = advantages * ratio
-            pg_loss2 = advantages * jnp.clip(ratio, 1.0 - config.clip_eps, 1.0 + config.clip_eps)
+            pg_loss2 = advantages * jnp.clip(
+                ratio, 1.0 - config.clip_eps, 1.0 + config.clip_eps
+            )
             policy_loss_unmasked = -jnp.minimum(pg_loss1, pg_loss2)
-            policy_loss = jnp.mean(policy_loss_unmasked, where=bool_mask)
+            policy_loss = jnp.mean(policy_loss_unmasked, where=valid_mask)
 
             # --- Entropy Loss - Masked Mean using jnp.mean(where=...) ---
             entropy_bonus_unmasked = -entropy
-            entropy_bonus = jnp.mean(entropy_bonus_unmasked, where=bool_mask)
+            entropy_bonus = jnp.mean(entropy_bonus_unmasked, where=valid_mask)
 
-            total_loss = (policy_loss +
-                          config.vf_coef * value_loss + # Apply vf_coef here
-                          config.entropy_coef * entropy_bonus)
+            total_loss = (
+                policy_loss
+                + config.vf_coef * value_loss  # Apply vf_coef here
+                + config.entropy_coef * entropy_bonus
+            )
 
             # --- Approximate KL Divergence - Masked Mean using jnp.mean(where=...) ---
             approx_kl_unmasked = (ratio - 1.0) - log_ratio
-            approx_kl = jnp.mean(approx_kl_unmasked, where=bool_mask)
+            approx_kl = jnp.mean(approx_kl_unmasked, where=valid_mask)
 
             # --- Clip Fraction - Masked Mean using jnp.mean(where=...) ---
             # Need to cast boolean clip fraction to float for mean
-            clip_fraction_unmasked = (jnp.abs(ratio - 1.0) > config.clip_eps)
-            clip_fraction = jnp.mean(clip_fraction_unmasked.astype(jnp.float32), where=bool_mask)
+            clip_fraction_unmasked = jnp.abs(ratio - 1.0) > config.clip_eps
+            clip_fraction = jnp.mean(
+                clip_fraction_unmasked.astype(jnp.float32), where=valid_mask
+            )
 
             metrics = {
                 "total_loss": total_loss,
@@ -162,16 +178,16 @@ class PPOTrainer:
                 "entropy": -entropy_bonus,
                 "approx_kl": approx_kl,
                 "clip_fraction": clip_fraction,
-                "mask_sum_fraction": mask_sum / valid_mask.size # Re-added metric
+                "mask_sum_fraction": mask_sum / valid_mask.size,  # Re-added metric
             }
             return total_loss, metrics
 
-        @partial(jax.jit, static_argnames=["optimizer", "model_apply_fn"])
+        @partial(jax.jit, static_argnames=["optimizer", "model"])
         def _update_minibatch(
             params: optax.Params,
             opt_state: optax.OptState,
             optimizer: optax.GradientTransformation,
-            model_apply_fn: Callable,
+            model: ActorCritic,
             minibatch: Dict[str, jnp.ndarray],
         ) -> Tuple[optax.Params, optax.OptState, Dict[str, jnp.ndarray]]:
             grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
@@ -206,20 +222,26 @@ class PPOTrainer:
 
             for i in range(effective_num_minibatches):
                 start_idx = i * batch_size
-                end_idx = start_idx + batch_size if i < effective_num_minibatches - 1 else total_data_points
+                end_idx = (
+                    start_idx + batch_size
+                    if i < effective_num_minibatches - 1
+                    else total_data_points
+                )
 
                 mb_indices = shuffled_indices[start_idx:end_idx]
 
                 mini_batch = jax.tree.map(lambda x: x[mb_indices], full_batch)
 
                 params, opt_state, step_metrics = _update_minibatch(
-                    params, opt_state, optimizer, model_apply_fn, mini_batch
+                    params, opt_state, optimizer, model, mini_batch
                 )
                 metrics_history.append(step_metrics)
 
         if not metrics_history:
             final_metrics = {}
         else:
-            final_metrics = jax.tree_map(lambda *xs: jnp.mean(jnp.stack(xs)), *metrics_history)
+            final_metrics = jax.tree.map(
+                lambda *xs: jnp.mean(jnp.stack(xs)), *metrics_history
+            )
 
         return rng, params, opt_state, final_metrics
