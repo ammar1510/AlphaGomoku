@@ -10,32 +10,6 @@ from .base import JaxEnvBase, EnvState
 WIN_LENGTH = 5
 
 
-@partial(jax.jit, static_argnums=(0,))
-def _create_win_kernels(win_len: int = WIN_LENGTH):
-    """Create convolution kernels for win detection."""
-    # Horizontal kernel
-    kernel_h = jnp.zeros((win_len, win_len), dtype=jnp.float32)
-    kernel_h = kernel_h.at[win_len // 2, :].set(1)
-    # Vertical kernel
-    kernel_v = jnp.zeros((win_len, win_len), dtype=jnp.float32)
-    kernel_v = kernel_v.at[:, win_len // 2].set(1)
-    # Diagonal kernel
-    kernel_d1 = jnp.eye(win_len, dtype=jnp.float32)
-    # Anti-diagonal kernel
-    kernel_d2 = jnp.fliplr(kernel_d1)
-
-    kernels = jnp.stack(
-        [kernel_h, kernel_v, kernel_d1, kernel_d2], axis=-1
-    )  # Shape (win_len, win_len, 4)
-    # Reshape for lax.conv_general_dilated: (H, W, I, O) -> (H, W, 1, 4)
-    kernels = jnp.expand_dims(kernels, axis=2)
-    return kernels
-
-
-WIN_KERNELS = _create_win_kernels(WIN_LENGTH)
-WIN_KERNELS_DN = ("NHWC", "HWIO", "NHWC")
-
-
 # --- State Definition ---
 class GomokuState(NamedTuple):
     """Holds the dynamic state of the batched Gomoku environment."""
@@ -73,6 +47,40 @@ class GomokuJaxEnv(JaxEnvBase):
         self.board_size = board_size
         self.win_length = win_length
 
+        # Pre-compute kernels using the static method
+        self.win_kernels = GomokuJaxEnv._create_win_kernels(self.win_length)
+        self.win_kernels_dn = ("NHWC", "HWIO", "NHWC")
+
+    @staticmethod
+    @partial(jax.jit, static_argnums=(0,))
+    def _create_win_kernels(win_len: int = WIN_LENGTH):
+        """Create convolution kernels for win detection."""
+        # Horizontal kernel
+        kernel_h = jnp.zeros((win_len, win_len), dtype=jnp.float32)
+        kernel_h = kernel_h.at[win_len // 2, :].set(1)
+        # Vertical kernel
+        kernel_v = jnp.zeros((win_len, win_len), dtype=jnp.float32)
+        kernel_v = kernel_v.at[:, win_len // 2].set(1)
+        # Diagonal kernel
+        kernel_d1 = jnp.eye(win_len, dtype=jnp.float32)
+        # Anti-diagonal kernel
+        kernel_d2 = jnp.fliplr(kernel_d1)
+
+        kernels = jnp.stack(
+            [kernel_h, kernel_v, kernel_d1, kernel_d2], axis=-1
+        )  # Shape (win_len, win_len, 4)
+        # Reshape for lax.conv_general_dilated: (H, W, I, O) -> (H, W, 1, 4)
+        kernels = jnp.expand_dims(kernels, axis=2)
+        return kernels
+
+
+        kernels = jnp.stack(
+            [kernel_h, kernel_v, kernel_d1, kernel_d2], axis=-1
+        )  # Shape (win_len, win_len, 4)
+        # Reshape for lax.conv_general_dilated: (H, W, I, O) -> (H, W, 1, 4)
+        kernels = jnp.expand_dims(kernels, axis=2)
+        return kernels
+
     @staticmethod
     @partial(jax.jit, static_argnames=("B", "board_size"))
     def init_state(rng: jax.random.PRNGKey, B: int, board_size: int) -> GomokuState:
@@ -95,18 +103,14 @@ class GomokuJaxEnv(JaxEnvBase):
             rng=rng,
         )
 
-    @staticmethod
-    @partial(jax.jit, static_argnames=("win_length",))
-    def _check_win(
-        board: jnp.ndarray, current_players: jnp.ndarray, win_length: int
-    ) -> jnp.ndarray:
+    def _check_win(self, board: jnp.ndarray, current_players: jnp.ndarray) -> jnp.ndarray:
         """
-        Check for wins using convolution. Pure function.
+        Check for wins using convolution. Uses pre-computed kernels from self.
 
         Args:
+            self: The GomokuJaxEnv instance.
             board: Game boards (B, H, W).
             current_players: Current player values (B,).
-            win_length: Number of pieces needed for a win.
 
         Returns:
             wins: Boolean array (B,) indicating wins for the current player.
@@ -120,13 +124,14 @@ class GomokuJaxEnv(JaxEnvBase):
 
         conv_output = lax.conv_general_dilated(
             player_boards_nhwc,
-            WIN_KERNELS,
+            self.win_kernels, # <-- Use pre-computed kernels from self
             window_strides=(1, 1),
             padding="SAME",
-            dimension_numbers=WIN_KERNELS_DN,
+            dimension_numbers=self.win_kernels_dn, # <-- Use pre-computed DN from self
         )
 
-        win_condition = conv_output == win_length
+        win_condition = conv_output == self.win_length # <-- Use self.win_length
+        #jax.debug.print("win condition: {win_condition}", win_condition=win_condition)
         wins = jnp.any(win_condition, axis=(1, 2, 3))  # Shape (B,)
         return wins
 
@@ -162,9 +167,7 @@ class GomokuJaxEnv(JaxEnvBase):
         )
 
         # check for win
-        win_patterns = GomokuJaxEnv._check_win(
-            new_boards, current_players, self.win_length
-        )
+        win_patterns = self._check_win(new_boards, current_players)
         current_wins = win_patterns & (~current_dones)
 
         new_winners = jnp.where(current_wins, current_players, current_winners)

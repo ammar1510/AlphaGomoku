@@ -12,7 +12,7 @@ seed: 42
 
 # Training loop parameters
 num_envs: 1024 # Number of parallel environments
-num_epochs: 8000        # Total number of PPO update epochs
+num_epochs: 4000        # Total number of PPO update epochs
 
 # Evaluation parameters
 eval_frequency: 100       # Evaluate every N epochs

@@ -143,18 +143,32 @@ def train(cfg: DictConfig):
         # We need to restore the total_env_steps as well if we want accurate step counts
         # For simplicity, we'll restore the training state but restart step count
         # A more robust solution would store total_env_steps in the checkpoint
-        restore_target = train_state_instance
-        restored_state = checkpointer.restore(
-            latest_step, args=ocp.args.StandardRestore(restore_target)
+
+        # Restore the dictionary directly using PyTreeRestore
+        restored_data = checkpointer.restore(
+            latest_step, args=ocp.args.PyTreeRestore()
         )
-        train_state_instance = restored_state
-        start_epoch = (
-            train_state_instance.update_step
-        )  # Assuming update_step tracks epochs now
+
+        # Recreate the training state from the restored dictionary
+        # Note: tx (optimizer structure) is recreated, opt_state is restored
+        train_state_instance = TrainingState.create(
+            apply_fn=model.apply,
+            params=restored_data['params'],
+            tx=tx,
+            opt_state=restored_data['opt_state'],
+            rng=restored_data['rng'],
+            # update_step will be set via replace below
+        )
+        # Set the update step (epoch number)
+        start_epoch = restored_data['update_step']
+        train_state_instance = train_state_instance.replace(update_step=start_epoch)
+
         logger.info(f"Restored state epoch: {start_epoch}")
-        # Reset total_env_steps - ideally restore it from checkpoint
-        total_env_steps = 0
-        logger.warning(f"Restored state, but total_env_steps counter reset to 0.")
+        # Restore total_env_steps from the checkpoint
+        total_env_steps = restored_data.get('total_env_steps', 0) # Default to 0 if not found for backward compatibility
+        logger.info(f"Restored total_env_steps to: {total_env_steps}")
+        if total_env_steps == 0:
+            logger.warning(f"Restored state, but total_env_steps counter started from 0 (either initial training or older checkpoint format).")
     else:
         logger.info("No checkpoint found, starting training from scratch.")
         train_state_instance = train_state_instance.replace(update_step=0)
@@ -313,8 +327,16 @@ def train(cfg: DictConfig):
             logger.info(
                 f"Saving checkpoint at epoch {current_update_step} (total env steps ~{total_env_steps})..."
             )
-            # Consider saving total_env_steps in the checkpoint for accurate resume
-            save_args = ocp.args.StandardSave(train_state_instance)
+            # Create a dictionary containing the state to save
+            save_data = {
+                "params": train_state_instance.params,
+                "opt_state": train_state_instance.opt_state,
+                "rng": train_state_instance.rng,
+                "update_step": train_state_instance.update_step,
+                "total_env_steps": total_env_steps, # Add total_env_steps here
+            }
+            # Save the dictionary using PyTreeSave
+            save_args = ocp.args.PyTreeSave(save_data)
             checkpointer.save(current_update_step, args=save_args, force=True)
             logger.info("Checkpoint saved.")
 

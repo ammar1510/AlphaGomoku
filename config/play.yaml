@@ -1,0 +1,25 @@
+# config/play.yaml
+defaults:
+  - gomoku: 5x5 # Use 5x5 as the default Gomoku config
+  - _self_ # Add _self_ for correct composition order (Hydra 1.1+)
+  # Add other defaults if necessary, e.g., from ppo if model loading needs it
+
+# Hydra settings
+hydra:
+  run:
+    dir: ./outputs/play/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    name: interactive_play
+
+# Play specific parameters
+checkpoint_dir: ./artifacts/checkpoints # Required: Path to the checkpoint directory (e.g., artifacts/checkpoints)
+checkpoint_step: 1700  # Required: Specific checkpoint step (epoch) to load
+
+user_plays: white # 'black' or 'white'
+seed: 42
+
+# Gomoku settings (can be overridden from command line)
+# Values from gomoku/5x5.yaml will be used unless specified here or via CLI
+# gomoku:
+#   board_size: 5
+#   win_length: 4 # Assuming 5x5 uses win_length 4, adjust if needed 
