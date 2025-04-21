@@ -94,6 +94,7 @@ class GomokuJaxEnv(JaxEnvBase):
             rng=rng,
         )
 
+    @partial(jax.jit, static_argnames=("self",))
     def _check_win(self, board: jnp.ndarray, current_players: jnp.ndarray) -> jnp.ndarray:
         """
         Check for wins using convolution. Uses pre-computed kernels from self.
@@ -117,12 +118,11 @@ class GomokuJaxEnv(JaxEnvBase):
             player_boards_nhwc,
             self.win_kernels, # <-- Use pre-computed kernels from self
             window_strides=(1, 1),
-            padding="SAME",
+            padding="SAME_LOWER",
             dimension_numbers=self.win_kernels_dn, # <-- Use pre-computed DN from self
         )
 
         win_condition = conv_output == self.win_length # <-- Use self.win_length
-        #jax.debug.print("win condition: {win_condition}", win_condition=win_condition)
         wins = jnp.any(win_condition, axis=(1, 2, 3))  # Shape (B,)
         return wins
 
@@ -205,7 +205,7 @@ class GomokuJaxEnv(JaxEnvBase):
         Returns:
             A tuple (new_state, initial_observations, info).
         """
-        next_rng = rng
+        next_rng = jax.random.split(rng)[0]
 
         new_state = GomokuJaxEnv.init_state(next_rng, self.B, self.board_size)
 
