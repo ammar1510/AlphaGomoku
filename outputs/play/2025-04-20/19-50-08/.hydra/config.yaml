@@ -1,0 +1,7 @@
+gomoku:
+  board_size: 5
+  win_length: 3
+checkpoint_dir: ./artifacts/checkpoints
+checkpoint_step: 7900
+user_plays: white
+seed: 42

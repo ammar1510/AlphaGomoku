@@ -1,429 +1,409 @@
-import unittest
-
+import pytest
 import jax
 import jax.numpy as jnp
-import numpy as np
+from alphagomoku.environments.gomoku import GomokuJaxEnv, GomokuState
 
-from env.gomoku import (
-    WIN_LENGTH,
-    check_win,
-    get_action_mask,
-    get_valid_actions,
-    init_env,
-    is_game_over,
-    reset_env,
-    run_random_episode,
-    sample_action,
-    step_env,
+# --- Fixtures ---
+
+@pytest.fixture
+def env_config_default():
+    """Default configuration for testing (5x5, win 3)."""
+    return {"B": 2, "board_size": 5, "win_length": 3}
+
+@pytest.fixture
+def env_config_draw():
+    """Configuration for draw testing (3x3, win 3)."""
+    return {"B": 1, "board_size": 3, "win_length": 3}
+
+@pytest.fixture
+def gomoku_env_default(env_config_default):
+    """Fixture to create a default GomokuJaxEnv instance."""
+    return GomokuJaxEnv(**env_config_default)
+
+@pytest.fixture
+def gomoku_env_draw(env_config_draw):
+    """Fixture to create a GomokuJaxEnv instance for draw tests."""
+    return GomokuJaxEnv(**env_config_draw)
+
+@pytest.fixture
+def initial_rng():
+    """Fixture for a repeatable RNG key."""
+    return jax.random.PRNGKey(42)
+
+# --- Tests ---
+
+def test_env_initialization(gomoku_env_default, env_config_default):
+    """Test if the environment initializes with correct parameters."""
+    assert gomoku_env_default.B == env_config_default["B"]
+    assert gomoku_env_default.board_size == env_config_default["board_size"]
+    assert gomoku_env_default.win_length == env_config_default["win_length"]
+    assert gomoku_env_default.win_kernels.shape == (env_config_default["win_length"], env_config_default["win_length"], 1, 4)
+    assert gomoku_env_default.observation_shape == (env_config_default["board_size"], env_config_default["board_size"])
+    assert gomoku_env_default.action_shape == (2,)
+
+def test_init_state(env_config_default, initial_rng):
+    """Test the static init_state method."""
+    B = env_config_default["B"]
+    board_size = env_config_default["board_size"]
+    state = GomokuJaxEnv.init_state(initial_rng, B, board_size)
+
+    assert isinstance(state, GomokuState)
+    assert state.boards.shape == (B, board_size, board_size)
+    assert jnp.all(state.boards == 0)
+    assert state.current_players.shape == (B,)
+    assert jnp.all(state.current_players == 1)
+    assert state.dones.shape == (B,)
+    assert jnp.all(state.dones == False)
+    assert state.winners.shape == (B,)
+    assert jnp.all(state.winners == 0)
+    assert jnp.array_equal(state.rng, initial_rng)
+
+@pytest.mark.parametrize(
+    "board_config, player, expected_win",
+    [
+        # No win
+        (jnp.array([
+            [0, 0, 0, 0, 0],
+            [0, 1, 1, 0, 0],
+            [0,-1, 0,-1, 0],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0]
+        ], dtype=jnp.float32), 1, False),
+        # Horizontal win (player 1)
+        (jnp.array([
+            [0, 0, 0, 0, 0],
+            [0, 1, 1, 1, 0],
+            [0,-1, 0,-1, 0],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0]
+        ], dtype=jnp.float32), 1, True),
+        # Vertical win (player -1)
+        (jnp.array([
+            [0, 0,-1, 0, 0],
+            [0, 1, -1, 1, 0],
+            [0, 0, -1, 0, 0],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0]
+        ], dtype=jnp.float32), -1, True),
+        # Diagonal win (player 1)
+        (jnp.array([
+            [1, 0, 0, 0, 0],
+            [0, 1,-1, 0, 0],
+            [0,-1, 1, 0, 0],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0]
+        ], dtype=jnp.float32), 1, True),
+        # Anti-diagonal win (player -1)
+        (jnp.array([
+            [0, 0, 0,-1, 0],
+            [0, 1,-1, 1, 0],
+            [0,-1, 0, 0, 0],
+            [-1, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0]
+        ], dtype=jnp.float32), -1, True),
+        # Border horizontal win (player 1)
+        (jnp.array([
+            [1, 1, 1, 0, 0],
+            [0,-1,-1, 0, 0],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0]
+        ], dtype=jnp.float32), 1, True),
+        # Border vertical win (player -1)
+        (jnp.array([
+            [0, 0, 0, 0,-1],
+            [0, 1, 1, 0,-1],
+            [0, 0, 0, 0,-1],
+            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0]
+        ], dtype=jnp.float32), -1, True),
+    ]
 )
-
-
-class TestFunctionalGomoku(unittest.TestCase):
-    def setUp(self):
-        """Set up test fixtures."""
-        # Use a fixed seed for deterministic testing
-        self.rng = jax.random.PRNGKey(42)
-        self.board_size = 9
-        self.B = 4
-
-    def test_init_env(self):
-        """Test environment initialization."""
-        env_state = init_env(self.board_size, self.B, self.rng)
-
-        # Check environment structure
-        self.assertIn("boards", env_state)
-        self.assertIn("current_players", env_state)
-        self.assertIn("dones", env_state)
-        self.assertIn("winners", env_state)
-        self.assertIn("board_size", env_state)
-        self.assertIn("B", env_state)
-        self.assertIn("rng", env_state)
-
-        # Check dimensions
-        self.assertEqual(
-            env_state["boards"].shape,
-            (self.B, self.board_size, self.board_size),
-        )
-        self.assertEqual(env_state["current_players"].shape, (self.B,))
-        self.assertEqual(env_state["dones"].shape, (self.B,))
-        self.assertEqual(env_state["winners"].shape, (self.B,))
-
-        # Check initial values
-        self.assertTrue(np.all(env_state["boards"] == 0))
-        self.assertTrue(np.all(env_state["current_players"] == 1))
-        self.assertTrue(np.all(env_state["dones"] == False))
-        self.assertTrue(np.all(env_state["winners"] == 0))
-        self.assertEqual(env_state["board_size"], self.board_size)
-        self.assertEqual(env_state["B"], self.B)
-
-    def test_reset_env(self):
-        """Test environment reset."""
-        # Initialize environment
-        env_state = init_env(self.board_size, self.B, self.rng)
-
-        # Modify state
-        new_board = env_state["boards"].at[0, 0, 0].set(1)
-        env_state["boards"] = new_board
-        env_state["current_players"] = env_state["current_players"].at[0].set(-1)
-        env_state["dones"] = env_state["dones"].at[0].set(True)
-
-        # Reset environment
-        new_rng = jax.random.PRNGKey(43)
-        new_env_state, observations = reset_env(env_state, new_rng)
-
-        # Check if reset properly
-        self.assertTrue(np.all(new_env_state["boards"] == 0))
-        self.assertTrue(np.all(new_env_state["current_players"] == 1))
-        self.assertTrue(np.all(new_env_state["dones"] == False))
-        self.assertTrue(np.all(new_env_state["winners"] == 0))
-
-        # Check observations
-        self.assertTrue(np.array_equal(observations, new_env_state["boards"]))
-
-        # Check if RNG was updated
-        self.assertTrue(np.array_equal(new_env_state["rng"], new_rng))
-
-    def test_check_win_horizontal(self):
-        """Test win detection for horizontal patterns."""
-        env_state = init_env(self.board_size, self.B, self.rng)
-
-        # Create a horizontal line of player 1 pieces in the first board
-        for i in range(WIN_LENGTH):
-            env_state["boards"] = env_state["boards"].at[0, 4, i].set(1)
-
-        # Check for wins
-        wins = check_win(env_state["boards"], env_state["current_players"])
-
-        # First board should have a win, others should not
-        self.assertTrue(wins[0])
-        self.assertTrue(np.all(wins[1:] == False))
-
-    def test_check_win_vertical(self):
-        """Test win detection for vertical patterns."""
-        env_state = init_env(self.board_size, self.B, self.rng)
-
-        # Create a vertical line of player 1 pieces in the second board
-        for i in range(WIN_LENGTH):
-            env_state["boards"] = env_state["boards"].at[1, i, 4].set(1)
-
-        # Check for wins
-        wins = check_win(env_state["boards"], env_state["current_players"])
-
-        # Second board should have a win, others should not
-        self.assertFalse(wins[0])
-        self.assertTrue(wins[1])
-        self.assertTrue(np.all(wins[2:] == False))
-
-    def test_check_win_diagonal(self):
-        """Test win detection for diagonal patterns."""
-        env_state = init_env(self.board_size, self.B, self.rng)
-
-        # Create a diagonal line of player 1 pieces in the third board
-        for i in range(WIN_LENGTH):
-            env_state["boards"] = env_state["boards"].at[2, i, i].set(1)
-
-        # Check for wins
-        wins = check_win(env_state["boards"], env_state["current_players"])
-
-        # Third board should have a win, others should not
-        self.assertFalse(wins[0])
-        self.assertFalse(wins[1])
-        self.assertTrue(wins[2])
-        self.assertFalse(wins[3])
-
-    def test_check_win_anti_diagonal(self):
-        """Test win detection for anti-diagonal patterns."""
-        env_state = init_env(self.board_size, self.B, self.rng)
-
-        # Create an anti-diagonal line of player 1 pieces in the fourth board
-        for i in range(WIN_LENGTH):
-            env_state["boards"] = (
-                env_state["boards"].at[3, i, WIN_LENGTH - 1 - i].set(1)
-            )
-
-        # Check for wins
-        wins = check_win(env_state["boards"], env_state["current_players"])
-
-        # Fourth board should have a win, others should not
-        self.assertFalse(wins[0])
-        self.assertFalse(wins[1])
-        self.assertFalse(wins[2])
-        self.assertTrue(wins[3])
-
-    def test_get_action_mask(self):
-        """Test action mask generation."""
-        env_state = init_env(self.board_size, self.B, self.rng)
-
-        # All actions should be valid initially
-        action_mask = get_action_mask(env_state)
-        self.assertTrue(np.all(action_mask))
-
-        # Place pieces on the board
-        env_state["boards"] = env_state["boards"].at[0, 0, 0].set(1)
-        env_state["boards"] = env_state["boards"].at[1, 1, 1].set(-1)
-
-        # Mark a board as done
-        env_state["dones"] = env_state["dones"].at[2].set(True)
-
-        # Get new action mask
-        action_mask = get_action_mask(env_state)
-
-        # Check if occupied spots are invalid
-        self.assertFalse(action_mask[0, 0, 0])
-        self.assertFalse(action_mask[1, 1, 1])
-
-        # Check if all positions on the done board are invalid
-        self.assertTrue(np.all(action_mask[2] == False))
-
-        # Other positions should still be valid
-        self.assertTrue(action_mask[0, 0, 1])
-        self.assertTrue(action_mask[1, 0, 0])
-        self.assertTrue(np.all(action_mask[3]))
-
-    def test_step_env(self):
-        """Test taking steps in the environment."""
-        env_state = init_env(self.board_size, self.B, self.rng)
-
-        # Take a step with valid actions
-        actions = jnp.array(
-            [
-                [1, 2],  # Board 0: row 1, col 2
-                [2, 3],  # Board 1: row 2, col 3
-                [3, 4],  # Board 2: row 3, col 4
-                [4, 5],  # Board 3: row 4, col 5
-            ]
-        )
-
-        new_env_state, observations, rewards, dones = step_env(env_state, actions)
-
-        # Check if pieces were placed correctly
-        self.assertEqual(new_env_state["boards"][0, 1, 2], 1)  # First board, player 1
-        self.assertEqual(new_env_state["boards"][1, 2, 3], 1)  # Second board, player 1
-        self.assertEqual(new_env_state["boards"][2, 3, 4], 1)  # Third board, player 1
-        self.assertEqual(new_env_state["boards"][3, 4, 5], 1)  # Fourth board, player 1
-
-        # Check if player switched
-        self.assertTrue(np.all(new_env_state["current_players"] == -1))
-
-        # Check if no wins yet
-        self.assertTrue(np.all(new_env_state["winners"] == 0))
-        self.assertTrue(np.all(dones == False))
-
-        # Take another step with player 2
-        actions = jnp.array(
-            [
-                [1, 3],  # Board 0: row 1, col 3
-                [2, 4],  # Board 1: row 2, col 4
-                [3, 5],  # Board 2: row 3, col 5
-                [4, 6],  # Board 3: row 4, col 6
-            ]
-        )
-
-        newer_env_state, observations, rewards, dones = step_env(new_env_state, actions)
-
-        # Check if pieces were placed correctly
-        self.assertEqual(
-            newer_env_state["boards"][0, 1, 3], -1
-        )  # First board, player -1
-        self.assertEqual(
-            newer_env_state["boards"][1, 2, 4], -1
-        )  # Second board, player -1
-        self.assertEqual(
-            newer_env_state["boards"][2, 3, 5], -1
-        )  # Third board, player -1
-        self.assertEqual(
-            newer_env_state["boards"][3, 4, 6], -1
-        )  # Fourth board, player -1
-
-        # Check if player switched back
-        self.assertTrue(np.all(newer_env_state["current_players"] == 1))
-
-    def test_step_env_win(self):
-        """Test winning scenario in step_env."""
-        env_state = init_env(self.board_size, self.B, self.rng)
-
-        # Set up a near-win state for player 1 in first board
-        for i in range(WIN_LENGTH - 1):
-            env_state["boards"] = env_state["boards"].at[0, 0, i].set(1)
-
-        # Take winning step
-        actions = jnp.array(
-            [
-                [0, WIN_LENGTH - 1],  # Complete the winning line
-                [1, 1],  # Random moves for other boards
-                [2, 2],
-                [3, 3],
-            ]
-        )
-
-        new_env_state, observations, rewards, dones = step_env(env_state, actions)
-
-        # Check if player 1 won on first board
-        self.assertEqual(new_env_state["winners"][0], 1)
-        self.assertTrue(dones[0])
-        self.assertEqual(rewards[0], 1)  # Player 1 gets reward 1
-
-        # Other boards should not have wins
-        self.assertTrue(np.all(new_env_state["winners"][1:] == 0))
-        self.assertTrue(np.all(dones[1:] == False))
-        self.assertTrue(np.all(rewards[1:] == 0))
-
-    def test_invalid_actions(self):
-        """Test behavior with invalid actions."""
-        env_state = init_env(self.board_size, self.B, self.rng)
-
-        # Place a piece at (0, 0) on first board
-        env_state["boards"] = env_state["boards"].at[0, 0, 0].set(1)
-
-        # Try to place another piece at the same position
-        actions = jnp.array(
-            [
-                [0, 0],  # Invalid: already occupied
-                [1, 1],  # Valid
-                [2, 2],  # Valid
-                [3, 3],  # Valid
-            ]
-        )
-
-        new_env_state, observations, rewards, dones = step_env(env_state, actions)
-
-        # The invalid action should not change the board state at that position
-        self.assertEqual(new_env_state["boards"][0, 0, 0], 1)  # Still player 1's piece
-
-        # Valid actions should still work
-        self.assertEqual(new_env_state["boards"][1, 1, 1], 1)
-        self.assertEqual(new_env_state["boards"][2, 2, 2], 1)
-        self.assertEqual(new_env_state["boards"][3, 3, 3], 1)
-
-    def test_sample_action(self):
-        """Test sampling random valid actions."""
-        env_state = init_env(self.board_size, self.B, self.rng)
-
-        # Place some pieces
-        env_state["boards"] = env_state["boards"].at[0, 0, 0].set(1)
-        env_state["boards"] = env_state["boards"].at[1, 1, 1].set(-1)
-
-        # Mark one board as done
-        env_state["dones"] = env_state["dones"].at[2].set(True)
-
-        # Sample actions
-        actions, new_env_state = sample_action(env_state, self.rng)
-
-        # Check that actions are valid
-        action_mask = get_action_mask(env_state)
-        for i in range(self.B):
-            if not env_state["dones"][i]:
-                row, col = actions[i]
-                # Skip if board is done
-                if i != 2:
-                    self.assertTrue(
-                        action_mask[i, row, col],
-                        f"Invalid action {actions[i]} for board {i}",
-                    )
-
-    def test_run_random_episode(self):
-        """Test running a complete random episode."""
-        board_size = 5  # Smaller board for faster test
-        B = 2
-
-        # Run episode
-        final_state, total_rewards = run_random_episode(board_size, B, seed=42)
-
-        # All games should be done
-        self.assertTrue(np.all(final_state["dones"]))
-
-        # There should be a winner or the board should be full
-        for i in range(B):
-            # Either there's a winner
-            if final_state["winners"][i] != 0:
-                winner = final_state["winners"][i]
-                self.assertTrue(winner == 1 or winner == -1)
-            # Or it's a draw (board is full)
-            else:
-                board_filled = np.all(final_state["boards"][i] != 0)
-                self.assertTrue(board_filled)
-
-        # Check rewards are consistent - not necessarily equal to winners
-        # The rewards from random episodes may accumulate differently than expected
-        # Just verify they're not zero when there's a winner
-        for i in range(B):
-            if final_state["winners"][i] != 0:
-                self.assertNotEqual(total_rewards[i], 0)
-                # Rewards should have the same sign as the winner
-                if final_state["winners"][i] > 0:
-                    self.assertGreater(total_rewards[i], 0)
-                else:
-                    self.assertLess(total_rewards[i], 0)
-
-    def test_get_valid_actions(self):
-        """Test getting all valid actions."""
-        env_state = init_env(3, 2, self.rng)  # Small board for easier testing
-
-        # All actions should be valid initially
-        valid_actions = get_valid_actions(env_state)
-
-        # Check shape
-        self.assertEqual(
-            valid_actions.shape, (2, 9, 2)
-        )  # 2 boards, 9 positions (3x3), 2 coordinates
-
-        # Place a piece and mark a board as done
-        env_state["boards"] = env_state["boards"].at[0, 0, 0].set(1)
-        env_state["dones"] = env_state["dones"].at[1].set(True)
-
-        # Get valid actions again
-        valid_actions = get_valid_actions(env_state)
-
-        # First board should have 8 valid actions (9 - 1 occupied)
-        # Second board should have no valid actions (done)
-
-        # Check that get_valid_actions returns all possible actions and we need to filter based on the action mask
-        action_mask = get_action_mask(env_state)
-
-        # Verify that action positions correspond to valid positions in the action mask
-        valid_positions_count = 0
-        for action in valid_actions[0]:
-            row, col = action
-            if row >= 0 and col >= 0:  # Not padding
-                # Count valid positions according to action mask
-                if action_mask[0, row, col]:
-                    valid_positions_count += 1
-
-        # There should be 8 valid positions in a 3x3 board with one piece
-        self.assertEqual(valid_positions_count, 8)
-
-        # Check that second board has no valid actions according to mask
-        second_board_valid = False
-        for action in valid_actions[1]:
-            row, col = action
-            if row >= 0 and col >= 0:  # Not padding
-                if action_mask[1, row, col]:
-                    second_board_valid = True
-                    break
-
-        self.assertFalse(
-            second_board_valid, "Done board should have no valid actions in the mask"
-        )
-
-    def test_is_game_over(self):
-        """Test game over detection."""
-        env_state = init_env(self.board_size, self.B, self.rng)
-
-        # No games should be over initially
-        game_over = is_game_over(env_state)
-        self.assertTrue(np.all(game_over == False))
-
-        # Mark some games as done
-        env_state["dones"] = env_state["dones"].at[0].set(True)
-        env_state["dones"] = env_state["dones"].at[2].set(True)
-
-        # Check game over again
-        game_over = is_game_over(env_state)
-        self.assertTrue(game_over[0])
-        self.assertFalse(game_over[1])
-        self.assertTrue(game_over[2])
-        self.assertFalse(game_over[3])
-
-
-if __name__ == "__main__":
-    unittest.main()
+def test_check_win(gomoku_env_default, board_config, player, expected_win):
+    """Test the _check_win method with various board configurations."""
+    B = gomoku_env_default.B
+    # Create batched inputs
+    boards = jnp.stack([board_config] * B, axis=0) # Same board for both envs in batch
+    players = jnp.array([player] * B, dtype=jnp.int32)
+
+    win_results = gomoku_env_default._check_win(boards, players)
+
+    assert win_results.shape == (B,)
+    assert jnp.all(win_results == expected_win)
+
+def test_step_valid_move(gomoku_env_default, env_config_default, initial_rng):
+    """Test a single valid step in the environment."""
+    B = env_config_default["B"]
+    board_size = env_config_default["board_size"]
+    state = GomokuJaxEnv.init_state(initial_rng, B, board_size)
+
+    # Action: Place piece at (2, 2) for both environments
+    actions = jnp.array([[2, 2]] * B, dtype=jnp.int32)
+
+    new_state, observations, rewards, dones, info = gomoku_env_default.step(state, actions)
+
+    # Check state update
+    assert new_state.boards[0, 2, 2] == 1  # Player 1 moved
+    assert new_state.boards[1, 2, 2] == 1
+    assert jnp.all(new_state.current_players == -1) # Player should switch to -1
+    assert jnp.all(new_state.dones == False)
+    assert jnp.all(new_state.winners == 0)
+
+    # Check outputs
+    assert observations.shape == (B, board_size, board_size)
+    assert jnp.all(observations == new_state.boards)
+    assert rewards.shape == (B,)
+    assert jnp.all(rewards == 0.0)
+    assert dones.shape == (B,)
+    assert jnp.all(dones == False)
+    assert isinstance(info, dict)
+
+def test_step_invalid_move_occupied(gomoku_env_default, env_config_default, initial_rng):
+    """Test stepping on an already occupied square."""
+    B = env_config_default["B"]
+    board_size = env_config_default["board_size"]
+    state = GomokuJaxEnv.init_state(initial_rng, B, board_size)
+
+    # Make a first move
+    actions_1 = jnp.array([[2, 2]] * B, dtype=jnp.int32)
+    state, _, _, _, _ = gomoku_env_default.step(state, actions_1)
+    # state.boards[b, 2, 2] is now 1, player is -1
+
+    # Attempt to move on the same square again
+    actions_2 = jnp.array([[2, 2]] * B, dtype=jnp.int32)
+    new_state, observations, rewards, dones, info = gomoku_env_default.step(state, actions_2)
+
+    # Check state didn't change (except RNG potentially)
+    assert jnp.all(new_state.boards == state.boards)
+    assert jnp.all(new_state.current_players == state.current_players) # Player -1 remains
+    assert jnp.all(new_state.dones == state.dones)
+    assert jnp.all(new_state.winners == state.winners)
+
+    # Check outputs reflect no change
+    assert jnp.all(observations == state.boards)
+    assert jnp.all(rewards == 0.0)
+    assert jnp.all(dones == False)
+
+def test_step_invalid_move_after_done(gomoku_env_default, env_config_default, initial_rng):
+    """Test stepping after the game has ended."""
+    B = env_config_default["B"]
+    board_size = env_config_default["board_size"]
+    win_length = env_config_default["win_length"]
+
+    # Create a state where player 1 has just won (needs win_length = 3)
+    boards = jnp.zeros((B, board_size, board_size), dtype=jnp.float32)
+    boards = boards.at[:, 1, 0:win_length].set(1)
+    current_players = jnp.ones((B,), dtype=jnp.int32)
+    dones = jnp.ones((B,), dtype=jnp.bool_)
+    winners = jnp.ones((B,), dtype=jnp.int32)
+
+    state = GomokuState(
+        boards=boards,
+        current_players=current_players, # Player is still 1, as game just ended
+        dones=dones,
+        winners=winners,
+        rng=initial_rng
+    )
+
+    # Attempt to make another move
+    actions = jnp.array([[3, 3]] * B, dtype=jnp.int32)
+    new_state, observations, rewards, dones_out, info = gomoku_env_default.step(state, actions)
+
+    # Check state didn't change
+    assert jnp.all(new_state.boards == state.boards)
+    assert jnp.all(new_state.current_players == state.current_players)
+    assert jnp.all(new_state.dones == state.dones)
+    assert jnp.all(new_state.winners == state.winners)
+
+    # Check outputs reflect no change and game is done
+    assert jnp.all(observations == state.boards)
+    assert jnp.all(rewards == 0.0) # No reward for move after win
+    assert jnp.all(dones_out == True)
+
+def test_step_win_condition(gomoku_env_default, env_config_default, initial_rng):
+    """Test the step function resulting in a win."""
+    B = env_config_default["B"]
+    board_size = env_config_default["board_size"]
+    win_length = env_config_default["win_length"] # Needs 3 for this setup
+    state = GomokuJaxEnv.init_state(initial_rng, B, board_size)
+
+    # Setup board for player 1 to win on next move
+    boards = state.boards
+    boards = boards.at[:, 1, 0:win_length-1].set(1) # Player 1 places two
+    boards = boards.at[:, 2, 0:win_length-1].set(-1) # Player -1 places two
+    state = state._replace(boards=boards, current_players=jnp.ones((B,), dtype=jnp.int32))
+
+    # Action: Player 1 places the winning piece
+    actions = jnp.array([[1, win_length-1]] * B, dtype=jnp.int32)
+    new_state, observations, rewards, dones, info = gomoku_env_default.step(state, actions)
+
+    # Check state update for win
+    assert new_state.boards[0, 1, win_length-1] == 1
+    assert jnp.all(new_state.dones == True)
+    assert jnp.all(new_state.winners == 1) # Player 1 wins
+    assert jnp.all(new_state.current_players == 1) # Player does not switch after win
+
+    # Check outputs for win
+    assert jnp.all(observations == new_state.boards)
+    assert jnp.all(rewards == 1.0) # Reward for winning move
+    assert jnp.all(dones == True)
+
+def test_step_draw_condition(gomoku_env_draw, env_config_draw, initial_rng):
+    """Test the step function resulting in a draw (board full, no win)."""
+    # Use 3x3 board, win_length 3, B=1
+    B = env_config_draw["B"]
+    board_size = env_config_draw["board_size"]
+    state = GomokuJaxEnv.init_state(initial_rng, B, board_size)
+
+    # Fill the board in a pattern that doesn't lead to a win
+    # 1  -1   1
+    # -1 -1   1
+    # 1   1  -1 
+    # Next move is player -1 at (2, 2)
+    boards = jnp.array([
+        [[ 1, -1,  1],
+         [-1, -1,  1],
+         [ 1,  1,  0]] # Last spot empty
+    ], dtype=jnp.float32)
+    current_players = jnp.array([-1], dtype=jnp.int32)
+    state = state._replace(boards=boards, current_players=current_players)
+
+    # Action: Player -1 places the last piece
+    actions = jnp.array([[2, 2]], dtype=jnp.int32) # (B, 2)
+    new_state, observations, rewards, dones, info = gomoku_env_draw.step(state, actions)
+
+    # Check state update for draw
+    assert new_state.boards[0, 2, 2] == -1
+    assert jnp.all(new_state.boards != 0) # Board is full
+    assert jnp.all(new_state.dones == True) # Game is done
+    assert jnp.all(new_state.winners == 0) # No winner (draw)
+    assert jnp.all(new_state.current_players == -1) # Player doesn't switch after draw
+
+    # Check outputs for draw
+    assert jnp.all(observations == new_state.boards)
+    assert jnp.all(rewards == 0.0) # No reward for draw
+    assert jnp.all(dones == True)
+
+def test_reset(gomoku_env_default, env_config_default, initial_rng):
+    """Test resetting the environment."""
+    B = env_config_default["B"]
+    board_size = env_config_default["board_size"]
+    state = GomokuJaxEnv.init_state(initial_rng, B, board_size)
+
+    # Take a step
+    actions = jnp.array([[0, 0]] * B, dtype=jnp.int32)
+    state, _, _, _, _ = gomoku_env_default.step(state, actions)
+
+    # Reset the environment
+    reset_rng = jax.random.PRNGKey(99)
+    new_state, observations, info = gomoku_env_default.reset(reset_rng)
+
+    # Check if the new state is like an initial state
+    assert isinstance(new_state, GomokuState)
+    assert new_state.boards.shape == (B, board_size, board_size)
+    assert jnp.all(new_state.boards == 0)
+    assert new_state.current_players.shape == (B,)
+    assert jnp.all(new_state.current_players == 1)
+    assert new_state.dones.shape == (B,)
+    assert jnp.all(new_state.dones == False)
+    assert new_state.winners.shape == (B,)
+    assert jnp.all(new_state.winners == 0)
+    assert jnp.array_equal(new_state.rng, reset_rng) # Check if new RNG key is used
+
+    # Check outputs
+    assert observations.shape == (B, board_size, board_size)
+    assert jnp.all(observations == 0)
+    assert isinstance(info, dict)
+
+def test_get_action_mask_initial(gomoku_env_default, env_config_default, initial_rng):
+    """Test action mask on initial state (all valid)."""
+    B = env_config_default["B"]
+    board_size = env_config_default["board_size"]
+    state = GomokuJaxEnv.init_state(initial_rng, B, board_size)
+
+    mask = gomoku_env_default.get_action_mask(state)
+
+    assert mask.shape == (B, board_size, board_size)
+    assert mask.dtype == jnp.bool_
+    assert jnp.all(mask == True) # All actions initially valid
+
+def test_get_action_mask_ongoing(gomoku_env_default, env_config_default, initial_rng):
+    """Test action mask during an ongoing game."""
+    B = env_config_default["B"]
+    board_size = env_config_default["board_size"]
+    state = GomokuJaxEnv.init_state(initial_rng, B, board_size)
+
+    # Make a move
+    actions = jnp.array([[1, 1]] * B, dtype=jnp.int32)
+    state, _, _, _, _ = gomoku_env_default.step(state, actions)
+
+    mask = gomoku_env_default.get_action_mask(state)
+
+    assert mask.shape == (B, board_size, board_size)
+    assert mask.dtype == jnp.bool_
+    assert jnp.all(mask[:, 1, 1] == False) # Action at (1, 1) is now invalid
+    # Check a random other spot is still valid
+    assert jnp.all(mask[:, 0, 0] == True)
+    # Count False values - should be B (one per board)
+    assert jnp.sum(~mask) == B
+
+def test_get_action_mask_done(gomoku_env_default, env_config_default, initial_rng):
+    """Test action mask after game is done (all invalid)."""
+    B = env_config_default["B"]
+    board_size = env_config_default["board_size"]
+    win_length = env_config_default["win_length"]
+
+    # Create a state where player 1 has just won
+    boards = jnp.zeros((B, board_size, board_size), dtype=jnp.float32)
+    boards = boards.at[:, 1, 0:win_length].set(1)
+    current_players = jnp.ones((B,), dtype=jnp.int32)
+    dones = jnp.ones((B,), dtype=jnp.bool_)
+    winners = jnp.ones((B,), dtype=jnp.int32)
+
+    state = GomokuState(
+        boards=boards,
+        current_players=current_players,
+        dones=dones, # Game is done
+        winners=winners,
+        rng=initial_rng
+    )
+
+    mask = gomoku_env_default.get_action_mask(state)
+
+    assert mask.shape == (B, board_size, board_size)
+    assert mask.dtype == jnp.bool_
+    assert jnp.all(mask == False) # All actions invalid when done
+
+def test_initialize_trajectory_buffers(gomoku_env_default, env_config_default):
+    """Test the creation of trajectory buffers."""
+    B = env_config_default["B"]
+    max_steps = 10
+    obs_shape = gomoku_env_default.observation_shape
+    act_shape = gomoku_env_default.action_shape
+
+    buffers = gomoku_env_default.initialize_trajectory_buffers(max_steps)
+    observations, actions, rewards, dones, log_probs, current_players_buffer = buffers
+
+    assert observations.shape == (max_steps, B) + obs_shape
+    assert observations.dtype == jnp.float32
+    assert jnp.all(observations == 0)
+
+    assert actions.shape == (max_steps, B) + act_shape
+    assert actions.dtype == jnp.int32
+    assert jnp.all(actions == 0)
+
+    assert rewards.shape == (max_steps, B)
+    assert rewards.dtype == jnp.float32
+    assert jnp.all(rewards == 0)
+
+    assert dones.shape == (max_steps, B)
+    assert dones.dtype == jnp.bool_
+    assert jnp.all(dones == False)
+
+    assert log_probs.shape == (max_steps, B)
+    assert log_probs.dtype == jnp.float32
+    assert jnp.all(log_probs == 0)
+
+    assert current_players_buffer.shape == (max_steps, B)
+    assert current_players_buffer.dtype == jnp.int32
+    assert jnp.all(current_players_buffer == 0) 

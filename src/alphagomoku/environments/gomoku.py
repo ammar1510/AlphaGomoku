@@ -47,7 +47,6 @@ class GomokuJaxEnv(JaxEnvBase):
         self.board_size = board_size
         self.win_length = win_length
 
-        # Pre-compute kernels using the static method
         self.win_kernels = GomokuJaxEnv._create_win_kernels(self.win_length)
         self.win_kernels_dn = ("NHWC", "HWIO", "NHWC")
 
@@ -65,14 +64,6 @@ class GomokuJaxEnv(JaxEnvBase):
         kernel_d1 = jnp.eye(win_len, dtype=jnp.float32)
         # Anti-diagonal kernel
         kernel_d2 = jnp.fliplr(kernel_d1)
-
-        kernels = jnp.stack(
-            [kernel_h, kernel_v, kernel_d1, kernel_d2], axis=-1
-        )  # Shape (win_len, win_len, 4)
-        # Reshape for lax.conv_general_dilated: (H, W, I, O) -> (H, W, 1, 4)
-        kernels = jnp.expand_dims(kernels, axis=2)
-        return kernels
-
 
         kernels = jnp.stack(
             [kernel_h, kernel_v, kernel_d1, kernel_d2], axis=-1
