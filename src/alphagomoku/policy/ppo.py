@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import optax
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 from typing import Dict, Tuple, Any, Optional, Callable
 
@@ -40,6 +40,19 @@ class PPOTrainer:
             config: PPO configuration parameters.
         """
         self.config = config
+
+    @staticmethod
+    def _prepare_batch_for_update(batch_data: Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
+        """Reshapes arrays in the batch dictionary from (T, B, ...) to (T * B, ...)."""
+        reshaped_batch = {}
+        for key, value in batch_data.items():
+            if isinstance(value, jnp.ndarray):
+                T, B = value.shape[0], value.shape[1]
+                reshaped_batch[key] = value.reshape((T * B,) + value.shape[2:])
+            else:
+                # Handling non-arrays
+                reshaped_batch[key] = value
+        return reshaped_batch
 
     @staticmethod
     @jax.jit
@@ -188,7 +201,7 @@ class PPOTrainer:
             opt_state: optax.OptState,
             optimizer: optax.GradientTransformation,
             model: ActorCritic,
-            minibatch: Dict[str, jnp.ndarray],
+            minibatch: Dict[str, jnp.ndarray], # (N, ...)
         ) -> Tuple[optax.Params, optax.OptState, Dict[str, jnp.ndarray]]:
             grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
             (loss, metrics), grads = grad_fn(params, minibatch)
@@ -199,13 +212,8 @@ class PPOTrainer:
             return new_params, new_opt_state, metrics
 
         metrics_history = []
-        batch_leaves = jax.tree_util.tree_leaves(full_batch)
-        if not batch_leaves:
-            return rng, params, opt_state, {}
-        total_data_points = batch_leaves[0].shape[0]
+        total_data_points = full_batch["advantages"].size
 
-        if total_data_points == 0:
-            return rng, params, opt_state, {}
 
         batch_size = total_data_points // config.num_minibatches
         if batch_size == 0:

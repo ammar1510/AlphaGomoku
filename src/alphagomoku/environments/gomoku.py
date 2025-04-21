@@ -12,7 +12,7 @@ WIN_LENGTH = 5
 
 # --- State Definition ---
 class GomokuState(NamedTuple):
-    """Holds the dynamic state of the batched Gomoku environment."""
+    """Holds the dynamic state of the batched Gomoku environment for a single step."""
 
     boards: jnp.ndarray  # (B, board_size, board_size) float32 tensor
     current_players: jnp.ndarray  # (B,) int32 tensor (1 or -1)
@@ -205,9 +205,7 @@ class GomokuJaxEnv(JaxEnvBase):
         Returns:
             A tuple (new_state, initial_observations, info).
         """
-        next_rng = jax.random.split(rng)[0]
-
-        new_state = GomokuJaxEnv.init_state(next_rng, self.B, self.board_size)
+        new_state = GomokuJaxEnv.init_state(rng, self.B, self.board_size)
 
         # observations are player agnostic, representing the board state 1 for black and -1 for white.
         initial_observations = new_state.boards

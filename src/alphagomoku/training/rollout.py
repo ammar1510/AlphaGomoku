@@ -5,18 +5,9 @@ from functools import partial
 from typing import Dict, Any, Tuple, NamedTuple
 import distrax  # Added import
 
-# Import the base environment class and the type hint for state
 from alphagomoku.environments.base import JaxEnvBase, EnvState
 
-# Import the specific Gomoku environment state if needed for type hinting,
-# but the functions should ideally work with any EnvState.
-# from alphagomoku.environments.gomoku import GomokuState
 
-# Assume actor_critic model has methods: apply, sample_action, log_prob
-# These would typically be defined elsewhere (e.g., in a network module)
-
-
-# Define the LoopState NamedTuple
 class LoopState(NamedTuple):
     state: EnvState
     obs: jnp.ndarray
@@ -25,7 +16,7 @@ class LoopState(NamedTuple):
     rewards: jnp.ndarray
     dones: jnp.ndarray
     logprobs: jnp.ndarray
-    current_players: jnp.ndarray  # Added buffer for current player
+    current_players: jnp.ndarray  
     step_idx: int
     rng: jax.random.PRNGKey
     termination_step_indices: (
@@ -40,16 +31,16 @@ def player_move(
     """Takes a single step in the environment using the provided actor-critic."""
     current_state: EnvState = loop_state.state
     current_obs: jnp.ndarray = loop_state.obs
-    current_players: jnp.ndarray = (
+    current_player: jnp.ndarray = (
         current_state.current_players
-    )  # Renamed access and variable
+    ) 
     step_idx: int = loop_state.step_idx
     rng = loop_state.rng
 
     # Get policy distribution and value from the model
     pi_dist, _ = actor_critic.apply(
-        {"params": params}, current_obs, current_players
-    )  # Pass renamed variable
+        {"params": params}, current_obs, current_player
+    ) 
 
     # Get action mask from the environment
     action_mask = env.get_action_mask(current_state)  # (B, H, W)
@@ -76,12 +67,9 @@ def player_move(
     action = jnp.stack([action_row, action_col], axis=-1)  # Shape (B, 2)
 
     observations = loop_state.observations.at[step_idx].set(current_obs)
-    actions = loop_state.actions.at[step_idx].set(action)  # Store the (row, col) action
+    actions = loop_state.actions.at[step_idx].set(action)
     logprobs = loop_state.logprobs.at[step_idx].set(logprob)
-    # Use renamed local variable here
-    current_players_buffer_updated = loop_state.current_players.at[step_idx].set(
-        current_players
-    )
+    current_players = loop_state.current_players.at[step_idx].set(current_player)
 
     next_state, next_obs, step_rewards, dones, info = env.step(current_state, action)
 
@@ -105,10 +93,10 @@ def player_move(
         rewards=rewards,
         dones=dones_buffer,
         logprobs=logprobs,
-        current_players=current_players_buffer_updated,  # Use the updated buffer variable
+        current_players=current_players,
         step_idx=step_idx + 1,
         rng=rng,
-        termination_step_indices=new_termination_indices,  # Update termination indices
+        termination_step_indices=new_termination_indices,
     )
 
 
@@ -228,7 +216,7 @@ def run_episode(
         rewards=rewards,
         dones=dones_buffer,
         logprobs=logprobs,
-        current_players=current_players_buffer,  # Add player buffer
+        current_players=current_players_buffer, 
         step_idx=0,
         rng=initial_rng,
         termination_step_indices=initial_termination_indices,  # Initialize termination indices
@@ -269,7 +257,6 @@ def run_episode(
 
     final_state = lax.while_loop(cond_fn, body_fn_wrapped, initial_loop_state)
 
-    # Calculate valid mask from termination indices
     term_indices = final_state.termination_step_indices  # Shape (B,)
     T = final_state.step_idx  # Use actual steps taken up to buffer_size
     B = initial_obs.shape[0]
@@ -320,7 +307,6 @@ def calculate_returns(
     dones = dones.astype(jnp.float32)  # Ensure float
 
     def scan_fn_batch(carry_batch, step_data_batch):
-        # carry_batch: shape (B,)
         reward_batch, done_batch = step_data_batch
 
         new_carry_batch = reward_batch + gamma * carry_batch * (1.0 - done_batch)
@@ -377,7 +363,9 @@ def calculate_gae(
     values_tp1 = values[1:]  # V(s_1)...V(s_T), shape (T, B)
     dones = dones.astype(jnp.float32)  # Ensure float, shape (T, B)
 
-    # Calculate deltas: delta_t = r_t + gamma * V(s_{t+1}) * (1 - d_t) - V(s_t)
+    # Calculate deltas: delta_t = r_t - gamma * V(s_{t+1}) * (1 - d_t) - V(s_t)
+    # minus sign as the next value is wrt to opponent
+    # not sure if this is correct
     deltas = rewards - gamma * values_tp1 * (1.0 - dones) - values_t  # Shape (T, B)
 
     def scan_fn(carry_gae_batch, step_data_batch):
