@@ -12,6 +12,7 @@ class LoopState(NamedTuple):
     state: EnvState
     obs: jnp.ndarray
     observations: jnp.ndarray
+    values: jnp.ndarray
     actions: jnp.ndarray
     rewards: jnp.ndarray
     dones: jnp.ndarray
@@ -38,7 +39,7 @@ def player_move(
     rng = loop_state.rng
 
     # Get policy distribution and value from the model
-    pi_dist, _ = actor_critic.apply(
+    pi_dist, value = actor_critic.apply(
         {"params": params}, current_obs, current_player
     ) 
 
@@ -68,6 +69,7 @@ def player_move(
 
     observations = loop_state.observations.at[step_idx].set(current_obs)
     actions = loop_state.actions.at[step_idx].set(action)
+    values = loop_state.values.at[step_idx].set(value)
     logprobs = loop_state.logprobs.at[step_idx].set(logprob)
     current_players = loop_state.current_players.at[step_idx].set(current_player)
 
@@ -90,6 +92,7 @@ def player_move(
         obs=next_obs,
         observations=observations,
         actions=actions,
+        values=values,
         rewards=rewards,
         dones=dones_buffer,
         logprobs=logprobs,
@@ -200,7 +203,7 @@ def run_episode(
     initial_state, initial_obs, _ = env.reset(reset_rng)
 
     buffers = env.initialize_trajectory_buffers(buffer_size)
-    observations, actions, rewards, dones_buffer, logprobs, current_players_buffer = (
+    observations, actions, values, rewards, dones_buffer, logprobs, current_players_buffer = (
         buffers  # Unpack players buffer
     )
     B = initial_obs.shape[0]  # Infer batch size
@@ -213,6 +216,7 @@ def run_episode(
         obs=initial_obs,
         observations=observations,
         actions=actions,
+        values=values,
         rewards=rewards,
         dones=dones_buffer,
         logprobs=logprobs,
@@ -257,6 +261,12 @@ def run_episode(
 
     final_state = lax.while_loop(cond_fn, body_fn_wrapped, initial_loop_state)
 
+    #final value needed for GAE calculation
+    final_value = final_state.values[-1]
+    final_values = final_state.values.at[-1].set(final_value)
+
+
+
     term_indices = final_state.termination_step_indices  # Shape (B,)
     T = final_state.step_idx  # Use actual steps taken up to buffer_size
     B = initial_obs.shape[0]
@@ -273,6 +283,7 @@ def run_episode(
         # Use the full buffers
         "observations": final_state.observations,  # Shape (buffer_size, B, ...)
         "actions": final_state.actions,  # Shape (buffer_size, B, ...)
+        "values": final_values,  # Shape (buffer_size+1, B)
         "rewards": final_state.rewards,  # Shape (buffer_size, B)
         "dones": final_state.dones,  # Shape (buffer_size, B)
         "logprobs": final_state.logprobs,  # Shape (buffer_size, B)
@@ -363,20 +374,21 @@ def calculate_gae(
     values_tp1 = values[1:]  # V(s_1)...V(s_T), shape (T, B)
     dones = dones.astype(jnp.float32)  # Ensure float, shape (T, B)
 
-    # Calculate deltas: delta_t = r_t - gamma * V(s_{t+1}) * (1 - d_t) - V(s_t)
+    # Calculate deltas: delta_t = r_t - gamma * V(s_{t+1}) * (1 - d_t)
     # minus sign as the next value is wrt to opponent
     # not sure if this is correct
     deltas = rewards - gamma * values_tp1 * (1.0 - dones) - values_t  # Shape (T, B)
 
     def scan_fn(carry_gae_batch, step_data_batch):
-        # carry_gae_batch: shape (B,)
+        # carry_gae_batch: shape (B,) - Represents A_{t+1} from the opponent's perspective
         # step_data_batch: tuple (delta_batch, done_batch), each shape (B,)
         delta_batch, done_batch = step_data_batch
 
-        # Calculate GAE for the batch: A_t = delta_t + gamma * lambda * A_{t+1} * (1 - d_t)
+        # Calculate GAE for the batch: A_t = delta_t - gamma * lambda * A_{t+1} * (1 - d_t)
+        # Subtract the opponent's advantage A_{t+1} (carry_gae_batch) because of the zero-sum game
         # All operations are element-wise across the batch dimension.
         gae_batch = (
-            delta_batch + gamma * gae_lambda * (1.0 - done_batch) * carry_gae_batch
+            delta_batch - gamma * gae_lambda * (1.0 - done_batch) * carry_gae_batch
         )  # Shape (B,)
 
         # Return the new carry (current GAE) and the value to store (also current GAE)

@@ -229,14 +229,13 @@ class GomokuJaxEnv(JaxEnvBase):
 
         observations = jnp.zeros((max_steps, self.B) + obs_shape, dtype=jnp.float32)
         actions = jnp.zeros((max_steps, self.B) + act_shape, dtype=jnp.int32)
+        values = jnp.zeros((max_steps+1, self.B), dtype=jnp.float32)
         rewards = jnp.zeros((max_steps, self.B), dtype=jnp.float32)
         dones = jnp.zeros((max_steps, self.B), dtype=jnp.bool_)
         log_probs = jnp.zeros((max_steps, self.B), dtype=jnp.float32)
         current_players_buffer = jnp.zeros((max_steps, self.B), dtype=jnp.int32)
-        # Could potentially add value estimates here too if needed by the algorithm
-        # values = jnp.zeros((max_steps, self.B), dtype=jnp.float32)
 
-        return observations, actions, rewards, dones, log_probs, current_players_buffer
+        return observations, actions, values, rewards, dones, log_probs, current_players_buffer
 
     # Properties match base class (still using @property for convenience)
     @property

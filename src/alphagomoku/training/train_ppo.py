@@ -210,27 +210,9 @@ def train(cfg: DictConfig):
         total_env_steps += steps_this_iter
 
         # === GAE Calculation Phase ===
-        # Get final observation and player from the final EnvState
-        final_obs = final_env_state.boards
-        final_players = final_env_state.current_players
-        # Get value for the final state
-        #need to improve this -> handle in rollout
-        _, final_value_pred = model.apply(
-            {"params": current_params}, final_obs, final_players
-        )
-        # Get values for all states in the buffer
-        _, buffer_values_pred = jax.vmap(model.apply, in_axes=(None, 0, 0))(
-            {"params": current_params},
-            full_trajectory["observations"],
-            full_trajectory["current_players"],
-        )
-        # Concatenate buffer values and final value
-        all_values = jnp.concatenate(
-            [buffer_values_pred, final_value_pred[None, :]], axis=0
-        )
         advantages, returns = ppo_trainer.compute_gae_targets(
             rewards=full_trajectory["rewards"],
-            values=all_values,
+            values=full_trajectory["values"],
             dones=full_trajectory["dones"],
             gamma=cfg.ppo.gamma,
             gae_lambda=cfg.ppo.gae_lambda,
