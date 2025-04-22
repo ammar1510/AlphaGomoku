@@ -12,7 +12,7 @@ WIN_LENGTH = 5
 
 # --- State Definition ---
 class GomokuState(NamedTuple):
-    """Holds the dynamic state of the batched Gomoku environment."""
+    """Holds the dynamic state of the batched Gomoku environment for a single step."""
 
     boards: jnp.ndarray  # (B, board_size, board_size) float32 tensor
     current_players: jnp.ndarray  # (B,) int32 tensor (1 or -1)
@@ -205,9 +205,7 @@ class GomokuJaxEnv(JaxEnvBase):
         Returns:
             A tuple (new_state, initial_observations, info).
         """
-        next_rng = jax.random.split(rng)[0]
-
-        new_state = GomokuJaxEnv.init_state(next_rng, self.B, self.board_size)
+        new_state = GomokuJaxEnv.init_state(rng, self.B, self.board_size)
 
         # observations are player agnostic, representing the board state 1 for black and -1 for white.
         initial_observations = new_state.boards
@@ -231,14 +229,13 @@ class GomokuJaxEnv(JaxEnvBase):
 
         observations = jnp.zeros((max_steps, self.B) + obs_shape, dtype=jnp.float32)
         actions = jnp.zeros((max_steps, self.B) + act_shape, dtype=jnp.int32)
+        values = jnp.zeros((max_steps+1, self.B), dtype=jnp.float32)
         rewards = jnp.zeros((max_steps, self.B), dtype=jnp.float32)
         dones = jnp.zeros((max_steps, self.B), dtype=jnp.bool_)
         log_probs = jnp.zeros((max_steps, self.B), dtype=jnp.float32)
         current_players_buffer = jnp.zeros((max_steps, self.B), dtype=jnp.int32)
-        # Could potentially add value estimates here too if needed by the algorithm
-        # values = jnp.zeros((max_steps, self.B), dtype=jnp.float32)
 
-        return observations, actions, rewards, dones, log_probs, current_players_buffer
+        return observations, actions, values, rewards, dones, log_probs, current_players_buffer
 
     # Properties match base class (still using @property for convenience)
     @property

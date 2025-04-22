@@ -12,7 +12,7 @@ import time
 import os
 from functools import partial
 import hydra.utils
-import logging  # Import the logging library
+import logging  
 
 from alphagomoku.environments.gomoku import GomokuJaxEnv, GomokuState
 from alphagomoku.models.gomoku.actor_critic import ActorCritic
@@ -210,26 +210,9 @@ def train(cfg: DictConfig):
         total_env_steps += steps_this_iter
 
         # === GAE Calculation Phase ===
-        # Get final observation and player from the final EnvState
-        final_obs = final_env_state.boards
-        final_players = final_env_state.current_players
-        # Get value for the final state
-        _, final_value_pred = model.apply(
-            {"params": current_params}, final_obs, final_players
-        )
-        # Get values for all states in the buffer
-        _, buffer_values_pred = jax.vmap(model.apply, in_axes=(None, 0, 0))(
-            {"params": current_params},
-            full_trajectory["observations"],
-            full_trajectory["current_players"],
-        )
-        # Concatenate buffer values and final value
-        all_values = jnp.concatenate(
-            [buffer_values_pred, final_value_pred[None, :]], axis=0
-        )
         advantages, returns = ppo_trainer.compute_gae_targets(
             rewards=full_trajectory["rewards"],
-            values=all_values,
+            values=full_trajectory["values"],
             dones=full_trajectory["dones"],
             gamma=cfg.ppo.gamma,
             gae_lambda=cfg.ppo.gae_lambda,
@@ -242,11 +225,12 @@ def train(cfg: DictConfig):
             "logprobs_old": full_trajectory["logprobs"],
             "advantages": advantages,
             "returns": returns,
-            "current_players": full_trajectory[
-                "current_players"
-            ],  # Add players to batch
+            "current_players": full_trajectory["current_players"],  
             "valid_mask": full_trajectory["valid_mask"],
         }
+
+        # Prepare batch for update (reshape T,B,... -> T*B,...)
+        prepared_batch = PPOTrainer._prepare_batch_for_update(batch_data)
 
         # === Update Phase ===
         update_rng, current_rng = jax.random.split(current_rng)
@@ -257,7 +241,7 @@ def train(cfg: DictConfig):
                 params=current_params,
                 optimizer=tx,
                 opt_state=train_state_instance.opt_state,
-                full_batch=batch_data,
+                full_batch=prepared_batch,
                 config=ppo_config,
             )
         )
