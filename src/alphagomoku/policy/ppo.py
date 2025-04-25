@@ -42,7 +42,7 @@ class PPOTrainer:
         self.config = config
 
     @staticmethod
-    def _prepare_batch_for_update(batch_data: Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
+    def prepare_batch_for_update(batch_data: Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
         """Reshapes arrays in the batch dictionary from (T, B, ...) to (T * B, ...)."""
         reshaped_batch = {}
         for key, value in batch_data.items():
@@ -216,11 +216,7 @@ class PPOTrainer:
 
 
         batch_size = total_data_points // config.num_minibatches
-        if batch_size == 0:
-            batch_size = total_data_points
-            effective_num_minibatches = 1
-        else:
-            effective_num_minibatches = config.num_minibatches
+        effective_num_minibatches = config.num_minibatches
 
         indices = jnp.arange(total_data_points)
 
