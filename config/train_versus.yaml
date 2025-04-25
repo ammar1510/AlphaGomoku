@@ -1,0 +1,43 @@
+# @package _global_
+
+defaults:
+  - _self_ # Ensures values in this file are loaded
+  - gomoku: 5x5 # Correct path to gomoku config group
+  - ppo: default
+  - override hydra/job_logging: default
+  - override hydra/hydra_logging: default
+
+# Overall training configuration
+seed: 42
+
+# Training loop parameters
+num_envs: 1024 # Number of parallel environments
+num_epochs: 4000        # Total number of PPO update epochs
+
+# Evaluation parameters (Keep or remove if versus script doesn't eval)
+eval_frequency: 100       # Evaluate every N epochs
+eval_games: 128          # Number of games to play during evaluation
+
+# Checkpointing parameters
+save_frequency: 100       # Save checkpoint every N epochs
+checkpoint_dir: "checkpoints_versus" # Default directory for versus checkpoints
+max_checkpoints: 10
+
+# WandB configuration
+wandb:
+  project: "alphagomoku-ppo-versus"
+  entity: ammar7 # Set your wandb entity here or via env var WANDB_ENTITY
+  run_name: null # If None, wandb generates one (Script adds _versus anyway)
+  mode: "online" # or "disabled"
+
+# Hydra specific configuration (usually kept same)
+hydra:
+  run:
+    dir: ${oc.env:PWD}/artifacts/versus_${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${oc.env:PWD}/artifacts/versus_multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  output_subdir: .hydra # Disable the .hydra subdirectory
+
+# Miscellaneous
+render: false 
