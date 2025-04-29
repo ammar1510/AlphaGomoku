@@ -204,9 +204,17 @@ def train(cfg: DictConfig):
     # Partially apply the static model argument and JIT compile specialized 
     # update functions to avoid recompilation within the loop.
     logger.info("Compiling update function for black agent...")
-    partial_update_step_black = jax.jit(partial(PPOTrainer.update_step, model=black_model))
+    # Mark 'optimizer' and 'config' as static in the outer JIT as well
+    partial_update_step_black = jax.jit(
+        partial(PPOTrainer.update_step, model=black_model), 
+        static_argnames=['optimizer', 'config']
+    )
     logger.info("Compiling update function for white agent...")
-    partial_update_step_white = jax.jit(partial(PPOTrainer.update_step, model=white_model))
+    # Mark 'optimizer' and 'config' as static in the outer JIT as well
+    partial_update_step_white = jax.jit(
+        partial(PPOTrainer.update_step, model=white_model),
+        static_argnames=['optimizer', 'config']
+    )
     logger.info("Update functions compiled.")
 
     # --- Training Loop --- (Iterates over epochs)
