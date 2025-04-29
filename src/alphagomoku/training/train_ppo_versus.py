@@ -56,10 +56,12 @@ def train(cfg: DictConfig):
 
     # WandB Setup
     wandb_config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
+    # Determine the run name: append suffix if provided, otherwise let wandb decide
+
     run = wandb.init(
         project=cfg.wandb.project,
         entity=cfg.wandb.entity,
-        name=cfg.wandb.run_name + "_versus", # Append suffix to distinguish run
+        name=cfg.wandb.run_name, 
         config=wandb_config,
         mode=cfg.wandb.mode,
         dir=artifacts_dir, # Use artifacts_dir directly, path = artifacts_dir/wandb
