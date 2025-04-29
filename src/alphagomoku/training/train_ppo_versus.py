@@ -200,6 +200,15 @@ def train(cfg: DictConfig):
         white_train_state = white_train_state.replace(update_step=0)
 
 
+    # --- Pre-compile Update Steps --- 
+    # Partially apply the static model argument and JIT compile specialized 
+    # update functions to avoid recompilation within the loop.
+    logger.info("Compiling update function for black agent...")
+    partial_update_step_black = jax.jit(partial(PPOTrainer.update_step, model=black_model))
+    logger.info("Compiling update function for white agent...")
+    partial_update_step_white = jax.jit(partial(PPOTrainer.update_step, model=white_model))
+    logger.info("Update functions compiled.")
+
     # --- Training Loop --- (Iterates over epochs)
     logger.info(
         f"Starting training from epoch {start_epoch} for {cfg.num_epochs - start_epoch} more epochs ({cfg.num_epochs} total epochs configured)..."
@@ -275,9 +284,8 @@ def train(cfg: DictConfig):
             black_params_updated,
             black_opt_state_updated,
             black_update_metrics,
-        ) = PPOTrainer.update_step(
+        ) = partial_update_step_black( # Call the pre-jitted black version
             rng=update_rng_black,
-            model=black_model,
             params=black_params_current,
             optimizer=black_tx,
             opt_state=black_train_state.opt_state,
@@ -303,9 +311,8 @@ def train(cfg: DictConfig):
             white_params_updated,
             white_opt_state_updated,
             white_update_metrics,
-        ) = PPOTrainer.update_step(
+        ) = partial_update_step_white( # Call the pre-jitted white version
             rng=update_rng_white,
-            model=white_model,
             params=white_params_current,
             optimizer=white_tx,
             opt_state=white_train_state.opt_state,
