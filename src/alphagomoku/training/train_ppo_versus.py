@@ -226,6 +226,9 @@ def train(cfg: DictConfig):
     env_state, current_obs, _ = env.reset(env_rng)
 
     for epoch in range(start_epoch, cfg.num_epochs):
+        # --- Add logging here ---
+        logger.info(f"--- Starting Epoch {epoch + 1}/{cfg.num_epochs} ---") 
+        # ------
         iter_start_time = time.time()
         # Get current parameters and RNGs for both agents
         black_params_current = black_train_state.params
@@ -278,17 +281,34 @@ def train(cfg: DictConfig):
         # Prepare batch reshapes (T, B, ...) -> (T * B, ...)
         prepared_batch_flat = PPOTrainer.prepare_batch_for_update(batch_data)
 
-        # === Update Phase (Separate for Black and White) ===
+        # === Update Phase (Separate for Black and White using Masks) ===
+
+        # --- Create Agent-Specific Masks ---
+        # Original mask indicating valid steps in the rollout
+        original_valid_mask_flat = prepared_batch_flat["valid_mask"]
+        # Mask indicating steps taken by black
+        is_black_player_flat = prepared_batch_flat["current_players"] == 1
+        # Mask indicating steps taken by white
+        is_white_player_flat = prepared_batch_flat["current_players"] == -1
+
+        # Combine original validity with player-specific masks
+        black_valid_mask_flat = original_valid_mask_flat & is_black_player_flat
+        white_valid_mask_flat = original_valid_mask_flat & is_white_player_flat
 
         # --- Black Agent Update ---
-        # Filter data where current_player == 1 (Black)
-        black_mask = prepared_batch_flat["current_players"] == 1
-        black_batch = jax.tree.map(lambda x: x[black_mask], prepared_batch_flat)
+        # Create a batch copy and insert the black-specific valid mask
+        # The shapes of all tensors remain (T*B, ...), avoiding recompilation
+        black_update_batch = prepared_batch_flat.copy()
+        black_update_batch["valid_mask"] = black_valid_mask_flat
 
-        # Check if black agent took any steps in this rollout
+        # Check if black agent took any steps in this rollout (check mask sum)
+        # update_rng_black, black_rng_current = jax.random.split(black_rng_current) # RNG split happens *before* call now
+
+        # Split RNG *before* the call
         update_rng_black, black_rng_current = jax.random.split(black_rng_current)
+
         (
-            update_rng_black, # Consumed RNG
+            update_rng_black, # Consumed RNG - This is redundant, the JIT returns the *new* key state
             black_params_updated,
             black_opt_state_updated,
             black_update_metrics,
@@ -297,25 +317,28 @@ def train(cfg: DictConfig):
             params=black_params_current,
             optimizer=black_tx,
             opt_state=black_train_state.opt_state,
-            full_batch=black_batch,
+            full_batch=black_update_batch, # Pass the masked batch
             config=ppo_config,
         )
         # Update black agent state
         black_train_state = black_train_state.replace(
             params=black_params_updated,
             opt_state=black_opt_state_updated,
-            rng=black_rng_current, # Store the updated RNG back
+            # rng=update_rng_black, # Use the RNG returned by the jitted function
+            rng=black_rng_current, # Store the *new* state of the RNG key
             update_step=epoch + 1,
         )
 
         # --- White Agent Update ---
-        # Filter data where current_player == -1 (White)
-        white_mask = prepared_batch_flat["current_players"] == -1
-        white_batch = jax.tree.map(lambda x: x[white_mask], prepared_batch_flat)
+        # Create a batch copy and insert the white-specific valid mask
+        white_update_batch = prepared_batch_flat.copy()
+        white_update_batch["valid_mask"] = white_valid_mask_flat
 
+        # Split RNG *before* the call
         update_rng_white, white_rng_current = jax.random.split(white_rng_current) # Use white's RNG
+
         (
-            update_rng_white, # Consumed RNG
+            update_rng_white, # Consumed RNG - This is redundant
             white_params_updated,
             white_opt_state_updated,
             white_update_metrics,
@@ -324,14 +347,15 @@ def train(cfg: DictConfig):
             params=white_params_current,
             optimizer=white_tx,
             opt_state=white_train_state.opt_state,
-            full_batch=white_batch,
+            full_batch=white_update_batch, # Pass the masked batch
             config=ppo_config,
         )
         # Update white agent state
         white_train_state = white_train_state.replace(
             params=white_params_updated,
             opt_state=white_opt_state_updated,
-            rng=white_rng_current, # Store the updated RNG back
+            # rng=update_rng_white, # Use the RNG returned by the jitted function
+            rng=white_rng_current, # Store the *new* state of the RNG key
             update_step=epoch + 1,
         )
 
