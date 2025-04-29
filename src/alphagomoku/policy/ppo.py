@@ -93,7 +93,7 @@ class PPOTrainer:
         return advantages_normalized, returns
 
     @staticmethod
-    @partial(jax.jit, static_argnums=(1, 3, 6))
+    @partial(jax.jit, static_argnames=['model', 'optimizer', 'config'])
     def update_step(
         rng: jax.random.PRNGKey,
         model: ActorCritic,
