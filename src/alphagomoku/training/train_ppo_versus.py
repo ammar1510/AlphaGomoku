@@ -226,9 +226,6 @@ def train(cfg: DictConfig):
     env_state, current_obs, _ = env.reset(env_rng)
 
     for epoch in range(start_epoch, cfg.num_epochs):
-        # --- Add logging here ---
-        logger.info(f"--- Starting Epoch {epoch + 1}/{cfg.num_epochs} ---") 
-        # ------
         iter_start_time = time.time()
         # Get current parameters and RNGs for both agents
         black_params_current = black_train_state.params

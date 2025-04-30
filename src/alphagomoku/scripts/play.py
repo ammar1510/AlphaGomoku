@@ -119,24 +119,39 @@ def play(cfg: DictConfig):
         return
 
     logging.info(f"Restoring checkpoint from step {target_step}...")
-    # Restore the dictionary containing the training state
-    # We only strictly need the 'params' for inference
-    restored_data = checkpointer.restore(target_step, args=ocp.args.PyTreeRestore())
-    if 'params' not in restored_data:
-         logging.error(f"Checkpoint at step {target_step} does not contain 'params'. Contents: {restored_data.keys()}")
-         # Attempting to restore from legacy format (if TrainingState object was saved directly)
-         if isinstance(restored_data, train_state.TrainState):
-             logging.warning("Attempting to load params from legacy TrainState object checkpoint.")
-             agent_params = restored_data.params
-         else:
-             return # Cannot find params
-    else:
-        agent_params = restored_data['params']
+    # Restore the dictionary containing the training state(s)
+    # The saved structure is {'black': {...}, 'white': {...}}
+    # We must use Composite restore to match the Composite save structure.
+    restore_args = ocp.args.Composite(
+        black=ocp.args.StandardRestore(),
+        white=ocp.args.StandardRestore()
+    )
+    restored_data = checkpointer.restore(target_step, args=restore_args)
 
-    logging.info("Agent parameters loaded successfully.")
+    agent_role = cfg.agent_role.lower() # Ensure lowercase for comparison
+    if agent_role not in restored_data:
+        logging.error(f"Agent role '{cfg.agent_role}' not found in the checkpoint keys: {list(restored_data.keys())}")
+        logging.error("Please ensure 'agent_role' in your config (play.yaml) is either 'black' or 'white'.")
+        return
+
+    # Access the specific agent's data
+    agent_data = restored_data[agent_role]
+
+    if 'params' not in agent_data:
+         logging.error(f"Checkpoint for agent '{agent_role}' at step {target_step} does not contain 'params'. Contents: {agent_data.keys()}")
+         # Attempting to restore from legacy format (if the agent_data IS a TrainState - less likely now)
+         if isinstance(agent_data, train_state.TrainState):
+             logging.warning(f"Attempting to load params from legacy TrainState object for agent '{agent_role}'.")
+             agent_params = agent_data.params
+         else:
+              logging.error(f"Could not find 'params' in the loaded data for agent '{agent_role}'.")
+              return # Cannot find params
+    else:
+        agent_params = agent_data['params']
+        logging.info(f"Parameters for '{agent_role}' agent loaded successfully.")
 
     # --- Initialize Model and Environment ---
-    agent_model = ActorCritic(board_size=board_size)
+    agent_model = ActorCritic(board_size=board_size, name=f"{agent_role}_player") # Optional: add name
     env = GomokuJaxEnv(B=1, board_size=board_size, win_length=win_length) # Batch size 1
 
     # --- Game Setup ---
