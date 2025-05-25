@@ -12,10 +12,11 @@ from alphagomoku.environments.base import JaxEnvBase, EnvState
 # Basic configuration for tests
 BOARD_SIZE = 5
 BATCH_SIZE = 2
-BUFFER_SIZE = 10 # Max episode length for tests
+BUFFER_SIZE = 10  # Max episode length for tests
 ACTION_DIM = BOARD_SIZE * BOARD_SIZE
 
 # --- Mocks ---
+
 
 class MockEnvState(NamedTuple):
     board: jnp.ndarray
@@ -23,6 +24,7 @@ class MockEnvState(NamedTuple):
     dones: jnp.ndarray
     step_count: int
     # Add other fields if your actual EnvState requires them for testing
+
 
 class MockEnv(JaxEnvBase):
     """A simplified mock environment for testing rollout logic."""
@@ -58,8 +60,12 @@ class MockEnv(JaxEnvBase):
 
     def reset(self, key: jax.random.PRNGKey) -> Tuple[MockEnvState, jnp.ndarray, Dict]:
         # Simple reset state
-        initial_board = jnp.zeros((self.batch_size, self.board_size, self.board_size), dtype=jnp.int32)
-        initial_players = jnp.ones((self.batch_size,), dtype=jnp.int32) # Player 1 starts
+        initial_board = jnp.zeros(
+            (self.batch_size, self.board_size, self.board_size), dtype=jnp.int32
+        )
+        initial_players = jnp.ones(
+            (self.batch_size,), dtype=jnp.int32
+        )  # Player 1 starts
         initial_dones = jnp.zeros((self.batch_size,), dtype=jnp.bool_)
         initial_step_count = jnp.zeros((self.batch_size,), dtype=jnp.int32)
 
@@ -67,14 +73,16 @@ class MockEnv(JaxEnvBase):
             board=initial_board,
             current_players=initial_players,
             dones=initial_dones,
-            step_count=initial_step_count
+            step_count=initial_step_count,
         )
         # Observation can be simple, e.g., the board itself or features
         initial_obs = self._get_obs(initial_state)
-        info = {} # No extra info needed for these tests
+        info = {}  # No extra info needed for these tests
         return initial_state, initial_obs, info
 
-    def step(self, state: MockEnvState, action: jnp.ndarray) -> Tuple[MockEnvState, jnp.ndarray, jnp.ndarray, jnp.ndarray, Dict]:
+    def step(
+        self, state: MockEnvState, action: jnp.ndarray
+    ) -> Tuple[MockEnvState, jnp.ndarray, jnp.ndarray, jnp.ndarray, Dict]:
         # action shape: (B, 2) [row, col]
         # Simulate a step: place piece, switch player, increment step, check basic done condition
         B = state.board.shape[0]
@@ -86,21 +94,25 @@ class MockEnv(JaxEnvBase):
         batch_indices = jnp.arange(B)
 
         # Simplified update - does not handle placement logic, just marks
-        new_board = state.board.at[batch_indices, row_indices, col_indices].set(state.current_players)
+        new_board = state.board.at[batch_indices, row_indices, col_indices].set(
+            state.current_players
+        )
 
-        next_players = 3 - state.current_players # Switch player (1 -> 2, 2 -> 1)
+        next_players = 3 - state.current_players  # Switch player (1 -> 2, 2 -> 1)
         next_step_count = state.step_count + 1
 
         # Simple done condition: game ends after 5 steps (for testing termination)
         # Also consider existing dones
         dones = (next_step_count >= 5) | state.dones
-        rewards = jnp.where(dones & ~state.dones, 1.0, 0.0) # Reward 1 on first termination
+        rewards = jnp.where(
+            dones & ~state.dones, 1.0, 0.0
+        )  # Reward 1 on first termination
 
         next_state = MockEnvState(
             board=new_board,
             current_players=next_players,
             dones=dones,
-            step_count=next_step_count
+            step_count=next_step_count,
         )
         next_obs = self._get_obs(next_state)
         info = {}
@@ -109,23 +121,38 @@ class MockEnv(JaxEnvBase):
     def _get_obs(self, state: MockEnvState) -> jnp.ndarray:
         # Simple observation: return board state, add player plane
         player_plane = jnp.ones_like(state.board) * state.current_players[:, None, None]
-        return jnp.stack([state.board, player_plane], axis=1) # Shape (B, C, H, W) -> (B, 2, 5, 5)
+        return jnp.stack(
+            [state.board, player_plane], axis=1
+        )  # Shape (B, C, H, W) -> (B, 2, 5, 5)
 
     def get_action_mask(self, state: MockEnvState) -> jnp.ndarray:
         # Return a mask where all non-occupied cells are valid
         # For simplicity, let's assume all actions are valid initially in tests
         # More realistically: return state.board == 0
-        return jnp.ones((self.batch_size, self.board_size, self.board_size), dtype=jnp.bool_)
+        return jnp.ones(
+            (self.batch_size, self.board_size, self.board_size), dtype=jnp.bool_
+        )
 
-    def initialize_trajectory_buffers(self, buffer_size: int) -> Tuple[jnp.ndarray, ...]:
+    def initialize_trajectory_buffers(
+        self, buffer_size: int
+    ) -> Tuple[jnp.ndarray, ...]:
         # Based on the expected buffers in rollout.py LoopState
-        obs_shape = (buffer_size, self.batch_size, 2, self.board_size, self.board_size) # (T, B, C, H, W)
-        action_shape = (buffer_size, self.batch_size, 2) # (T, B, action_dim=2)
-        value_shape = (buffer_size, self.batch_size) # (T, B) - Note: GAE needs T+1, handled separately
-        reward_shape = (buffer_size, self.batch_size) # (T, B)
-        done_shape = (buffer_size, self.batch_size) # (T, B)
-        logprob_shape = (buffer_size, self.batch_size) # (T, B)
-        player_shape = (buffer_size, self.batch_size) # (T, B)
+        obs_shape = (
+            buffer_size,
+            self.batch_size,
+            2,
+            self.board_size,
+            self.board_size,
+        )  # (T, B, C, H, W)
+        action_shape = (buffer_size, self.batch_size, 2)  # (T, B, action_dim=2)
+        value_shape = (
+            buffer_size,
+            self.batch_size,
+        )  # (T, B) - Note: GAE needs T+1, handled separately
+        reward_shape = (buffer_size, self.batch_size)  # (T, B)
+        done_shape = (buffer_size, self.batch_size)  # (T, B)
+        logprob_shape = (buffer_size, self.batch_size)  # (T, B)
+        player_shape = (buffer_size, self.batch_size)  # (T, B)
 
         observations = jnp.zeros(obs_shape, dtype=jnp.float32)
         actions = jnp.zeros(action_shape, dtype=jnp.int32)
@@ -140,7 +167,10 @@ class MockEnv(JaxEnvBase):
 
 class MockActorCritic:
     """A mock actor-critic model."""
-    def apply(self, params_dict: Dict, obs: jnp.ndarray, current_player: jnp.ndarray) -> Tuple[distrax.Distribution, jnp.ndarray]:
+
+    def apply(
+        self, params_dict: Dict, obs: jnp.ndarray, current_player: jnp.ndarray
+    ) -> Tuple[distrax.Distribution, jnp.ndarray]:
         # params_dict contains {'params': params}
         # obs shape: (B, C, H, W)
         # current_player: (B,) - Not used in this simple mock
@@ -152,29 +182,35 @@ class MockActorCritic:
         logits = jnp.zeros((B, action_dim))
         # Return a dummy value, e.g., proportional to step or fixed
         # Example: simple value based on sum of obs (not meaningful, just for testing flow)
-        value = jnp.mean(obs, axis=(1, 2, 3)) * 0.1 # Shape (B,)
+        value = jnp.mean(obs, axis=(1, 2, 3)) * 0.1  # Shape (B,)
 
         pi_dist = distrax.Categorical(logits=logits)
         return pi_dist, value
 
+
 # --- Pytest Fixtures ---
+
 
 @pytest.fixture
 def mock_env():
     return MockEnv(board_size=BOARD_SIZE, batch_size=BATCH_SIZE)
 
+
 @pytest.fixture
 def mock_actor_critic():
     return MockActorCritic()
+
 
 @pytest.fixture
 def dummy_params():
     # Params can be empty if MockActorCritic doesn't use them
     return {}
 
+
 @pytest.fixture
 def initial_rng():
     return jax.random.PRNGKey(42)
+
 
 @pytest.fixture
 def initial_loop_state(mock_env, mock_actor_critic, dummy_params, initial_rng):
@@ -200,18 +236,24 @@ def initial_loop_state(mock_env, mock_actor_critic, dummy_params, initial_rng):
         current_players=current_players,
         step_idx=0,
         rng=rng,
-        termination_step_indices=initial_termination_indices
+        termination_step_indices=initial_termination_indices,
     )
     return loop_state
 
+
 # --- Test Functions ---
 
-def test_player_move_updates_state(initial_loop_state, mock_env, mock_actor_critic, dummy_params):
+
+def test_player_move_updates_state(
+    initial_loop_state, mock_env, mock_actor_critic, dummy_params
+):
     """Test if player_move correctly updates the environment state and step index."""
     initial_step_idx = initial_loop_state.step_idx
     initial_player = initial_loop_state.state.current_players
 
-    new_loop_state = rollout.player_move(initial_loop_state, mock_env, mock_actor_critic, dummy_params)
+    new_loop_state = rollout.player_move(
+        initial_loop_state, mock_env, mock_actor_critic, dummy_params
+    )
 
     # Check step index increment
     assert new_loop_state.step_idx == initial_step_idx + 1
@@ -225,27 +267,37 @@ def test_player_move_updates_state(initial_loop_state, mock_env, mock_actor_crit
     # Check if RNG key is updated
     assert not jnp.array_equal(new_loop_state.rng, initial_loop_state.rng)
 
-def test_player_move_stores_data(initial_loop_state, mock_env, mock_actor_critic, dummy_params):
+
+def test_player_move_stores_data(
+    initial_loop_state, mock_env, mock_actor_critic, dummy_params
+):
     """Test if player_move correctly stores data in the trajectory buffers."""
     step_idx = initial_loop_state.step_idx
     initial_obs = initial_loop_state.obs
     initial_player = initial_loop_state.state.current_players
 
     # Get expected value from mock AC
-    _, expected_value = mock_actor_critic.apply({"params": dummy_params}, initial_obs, initial_player)
+    _, expected_value = mock_actor_critic.apply(
+        {"params": dummy_params}, initial_obs, initial_player
+    )
 
-    new_loop_state = rollout.player_move(initial_loop_state, mock_env, mock_actor_critic, dummy_params)
+    new_loop_state = rollout.player_move(
+        initial_loop_state, mock_env, mock_actor_critic, dummy_params
+    )
 
     # Check if data was stored at the correct index
     assert jnp.array_equal(new_loop_state.observations[step_idx], initial_obs)
-    assert new_loop_state.actions[step_idx].shape == (BATCH_SIZE, 2) # Check shape
+    assert new_loop_state.actions[step_idx].shape == (BATCH_SIZE, 2)  # Check shape
     assert jnp.all(new_loop_state.values[step_idx] == expected_value)
     assert new_loop_state.logprobs[step_idx].shape == (BATCH_SIZE,)
     assert jnp.all(new_loop_state.current_players[step_idx] == initial_player)
     assert new_loop_state.rewards[step_idx].shape == (BATCH_SIZE,)
     assert new_loop_state.dones[step_idx].shape == (BATCH_SIZE,)
 
-def test_player_move_handles_masking(initial_loop_state, mock_env, mock_actor_critic, dummy_params):
+
+def test_player_move_handles_masking(
+    initial_loop_state, mock_env, mock_actor_critic, dummy_params
+):
     """Test that actions are sampled according to the mask."""
     # Modify the mock env to provide a restrictive mask
     original_mask_fn = mock_env.get_action_mask
@@ -257,7 +309,9 @@ def test_player_move_handles_masking(initial_loop_state, mock_env, mock_actor_cr
         mock_env.get_action_mask = lambda state: mask
 
         # Run player_move with the restrictive mask
-        new_loop_state = rollout.player_move(initial_loop_state, mock_env, mock_actor_critic, dummy_params)
+        new_loop_state = rollout.player_move(
+            initial_loop_state, mock_env, mock_actor_critic, dummy_params
+        )
 
         # Get the action taken at step 0
         action_taken = new_loop_state.actions[0]
@@ -275,10 +329,15 @@ def test_player_move_handles_masking(initial_loop_state, mock_env, mock_actor_cr
         # Restore original mask function
         mock_env.get_action_mask = original_mask_fn
 
-def test_player_move_updates_termination_index(initial_loop_state, mock_env, mock_actor_critic, dummy_params):
+
+def test_player_move_updates_termination_index(
+    initial_loop_state, mock_env, mock_actor_critic, dummy_params
+):
     """Test that termination index is recorded correctly when done becomes true."""
     # --- First Step (not done) ---
-    state_step0 = rollout.player_move(initial_loop_state, mock_env, mock_actor_critic, dummy_params)
+    state_step0 = rollout.player_move(
+        initial_loop_state, mock_env, mock_actor_critic, dummy_params
+    )
     assert jnp.all(state_step0.termination_step_indices == jnp.iinfo(jnp.int32).max)
     assert state_step0.step_idx == 1
     assert not jnp.any(state_step0.state.dones)
@@ -286,12 +345,14 @@ def test_player_move_updates_termination_index(initial_loop_state, mock_env, moc
     # --- Force done on next step for one env ---
     # Manually set step count high for batch element 0 to trigger done in mock env
     intermediate_state = state_step0.state
-    high_step_count = intermediate_state.step_count.at[0].set(4) # Next step will be 5
+    high_step_count = intermediate_state.step_count.at[0].set(4)  # Next step will be 5
     intermediate_state = intermediate_state._replace(step_count=high_step_count)
     state_step0 = state_step0._replace(state=intermediate_state)
 
     # --- Second Step (one env becomes done) ---
-    state_step1 = rollout.player_move(state_step0, mock_env, mock_actor_critic, dummy_params)
+    state_step1 = rollout.player_move(
+        state_step0, mock_env, mock_actor_critic, dummy_params
+    )
 
     # Check termination index: should be step_idx (1) for batch 0, max for batch 1
     expected_term_indices = jnp.array([1, jnp.iinfo(jnp.int32).max], dtype=jnp.int32)
@@ -301,17 +362,22 @@ def test_player_move_updates_termination_index(initial_loop_state, mock_env, moc
     assert state_step1.step_idx == 2
 
     # --- Third Step (other env remains not done) ---
-    state_step2 = rollout.player_move(state_step1, mock_env, mock_actor_critic, dummy_params)
+    state_step2 = rollout.player_move(
+        state_step1, mock_env, mock_actor_critic, dummy_params
+    )
 
     # Termination index for batch 0 should remain 1
     expected_term_indices_2 = jnp.array([1, jnp.iinfo(jnp.int32).max], dtype=jnp.int32)
-    assert jnp.array_equal(state_step2.termination_step_indices, expected_term_indices_2)
-    assert state_step2.state.dones[0] == True # Stays done
+    assert jnp.array_equal(
+        state_step2.termination_step_indices, expected_term_indices_2
+    )
+    assert state_step2.state.dones[0] == True  # Stays done
     assert state_step2.state.dones[1] == False
     assert state_step2.step_idx == 3
 
 
 # Tests for run_episode will go here
+
 
 def test_run_episode_terminates(mock_env, mock_actor_critic, dummy_params, initial_rng):
     """Test that run_episode runs until all envs are done."""
@@ -322,10 +388,10 @@ def test_run_episode_terminates(mock_env, mock_actor_critic, dummy_params, initi
         env=mock_env,
         black_actor_critic=mock_actor_critic,
         black_params=dummy_params,
-        white_actor_critic=mock_actor_critic, # Use same for simplicity
+        white_actor_critic=mock_actor_critic,  # Use same for simplicity
         white_params=dummy_params,
         rng=initial_rng,
-        buffer_size=BUFFER_SIZE # Buffer larger than termination step
+        buffer_size=BUFFER_SIZE,  # Buffer larger than termination step
     )
 
     # Check if the final state shows done for all environments
@@ -334,7 +400,10 @@ def test_run_episode_terminates(mock_env, mock_actor_critic, dummy_params, initi
     # Note: step_idx in LoopState is the *next* step to take, so T is the final value
     assert trajectory["T"] == expected_termination_step
 
-def test_run_episode_alternates_players(mock_env, mock_actor_critic, dummy_params, initial_rng):
+
+def test_run_episode_alternates_players(
+    mock_env, mock_actor_critic, dummy_params, initial_rng
+):
     """Test that players alternate correctly during the episode."""
     trajectory, _, _ = rollout.run_episode(
         env=mock_env,
@@ -343,19 +412,25 @@ def test_run_episode_alternates_players(mock_env, mock_actor_critic, dummy_param
         white_actor_critic=mock_actor_critic,
         white_params=dummy_params,
         rng=initial_rng,
-        buffer_size=BUFFER_SIZE
+        buffer_size=BUFFER_SIZE,
     )
 
     T = trajectory["T"]
-    current_players = trajectory["current_players"] # Shape (buffer_size, B)
+    current_players = trajectory["current_players"]  # Shape (buffer_size, B)
 
     # Check players stored for executed steps
-    assert jnp.all(current_players[0, :] == 1) # Step 0: Black (Player 1)
-    if T > 1: assert jnp.all(current_players[1, :] == 2) # Step 1: White (Player 2)
-    if T > 2: assert jnp.all(current_players[2, :] == 1) # Step 2: Black (Player 1)
-    if T > 3: assert jnp.all(current_players[3, :] == 2) # Step 3: White (Player 2)
+    assert jnp.all(current_players[0, :] == 1)  # Step 0: Black (Player 1)
+    if T > 1:
+        assert jnp.all(current_players[1, :] == 2)  # Step 1: White (Player 2)
+    if T > 2:
+        assert jnp.all(current_players[2, :] == 1)  # Step 2: Black (Player 1)
+    if T > 3:
+        assert jnp.all(current_players[3, :] == 2)  # Step 3: White (Player 2)
 
-def test_run_episode_buffer_shapes(mock_env, mock_actor_critic, dummy_params, initial_rng):
+
+def test_run_episode_buffer_shapes(
+    mock_env, mock_actor_critic, dummy_params, initial_rng
+):
     """Test the shapes of the returned trajectory buffers."""
     trajectory, final_state, _ = rollout.run_episode(
         env=mock_env,
@@ -364,13 +439,13 @@ def test_run_episode_buffer_shapes(mock_env, mock_actor_critic, dummy_params, in
         white_actor_critic=mock_actor_critic,
         white_params=dummy_params,
         rng=initial_rng,
-        buffer_size=BUFFER_SIZE
+        buffer_size=BUFFER_SIZE,
     )
 
-    T = trajectory["T"] # Actual steps run
+    T = trajectory["T"]  # Actual steps run
     B = BATCH_SIZE
     H, W = BOARD_SIZE, BOARD_SIZE
-    OBS_C = 2 # Channels in mock obs
+    OBS_C = 2  # Channels in mock obs
 
     # Check shapes based on buffer_size, not T
     assert trajectory["observations"].shape == (BUFFER_SIZE, B, OBS_C, H, W)
@@ -389,14 +464,14 @@ def test_run_episode_buffer_shapes(mock_env, mock_actor_critic, dummy_params, in
     assert trajectory["logprobs"].shape == (BUFFER_SIZE, B)
     assert trajectory["current_players"].shape == (BUFFER_SIZE, B)
     assert trajectory["valid_mask"].shape == (BUFFER_SIZE, B)
-    assert isinstance(trajectory["T"], int) or trajectory["T"].ndim == 0 # Scalar
+    assert isinstance(trajectory["T"], int) or trajectory["T"].ndim == 0  # Scalar
     assert trajectory["termination_step_indices"].shape == (B,)
 
 
 def test_run_episode_valid_mask(mock_env, mock_actor_critic, dummy_params, initial_rng):
     """Test the calculation of the valid_mask."""
     # Mock env terminates at step 5 (index 4)
-    termination_step_idx = 4 # step_idx when done becomes true
+    termination_step_idx = 4  # step_idx when done becomes true
 
     trajectory, _, _ = rollout.run_episode(
         env=mock_env,
@@ -405,11 +480,11 @@ def test_run_episode_valid_mask(mock_env, mock_actor_critic, dummy_params, initi
         white_actor_critic=mock_actor_critic,
         white_params=dummy_params,
         rng=initial_rng,
-        buffer_size=BUFFER_SIZE
+        buffer_size=BUFFER_SIZE,
     )
 
-    valid_mask = trajectory["valid_mask"] # Shape (buffer_size, B)
-    term_indices = trajectory["termination_step_indices"] # Shape (B,)
+    valid_mask = trajectory["valid_mask"]  # Shape (buffer_size, B)
+    term_indices = trajectory["termination_step_indices"]  # Shape (B,)
     T = trajectory["T"]
 
     # In mock env, all batches terminate at the same time (step 5, index 4)
@@ -419,11 +494,13 @@ def test_run_episode_valid_mask(mock_env, mock_actor_critic, dummy_params, initi
     # Check mask values: True up to and including termination_step_idx, False after
     for b in range(BATCH_SIZE):
         for t in range(BUFFER_SIZE):
-            should_be_valid = (t <= termination_step_idx)
+            should_be_valid = t <= termination_step_idx
             assert valid_mask[t, b] == should_be_valid
 
 
-def test_run_episode_final_state(mock_env, mock_actor_critic, dummy_params, initial_rng):
+def test_run_episode_final_state(
+    mock_env, mock_actor_critic, dummy_params, initial_rng
+):
     """Test that the correct final environment state is returned."""
     trajectory, final_state, _ = rollout.run_episode(
         env=mock_env,
@@ -432,33 +509,31 @@ def test_run_episode_final_state(mock_env, mock_actor_critic, dummy_params, init
         white_actor_critic=mock_actor_critic,
         white_params=dummy_params,
         rng=initial_rng,
-        buffer_size=BUFFER_SIZE
+        buffer_size=BUFFER_SIZE,
     )
 
-    assert isinstance(final_state, MockEnvState) # Or the actual EnvState type
-    assert jnp.all(final_state.dones) # Should be done
-    assert jnp.all(final_state.step_count == trajectory["T"]) # Step count matches T
+    assert isinstance(final_state, MockEnvState)  # Or the actual EnvState type
+    assert jnp.all(final_state.dones)  # Should be done
+    assert jnp.all(final_state.step_count == trajectory["T"])  # Step count matches T
 
 
 # Tests for GAE/Returns will go here
+
 
 @pytest.mark.parametrize("gamma", [0.99, 1.0])
 def test_calculate_returns(gamma):
     """Test discounted return calculation with different gamma values."""
     # T=4, B=2
-    rewards = jnp.array([
-        [0.0, 0.0],
-        [0.0, 0.0],
-        [1.0, 0.0],
-        [0.0, 1.0]
-    ])
+    rewards = jnp.array([[0.0, 0.0], [0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
     # Env 0 done at step 3 (index 2), Env 1 done at step 4 (index 3)
-    dones = jnp.array([
-        [False, False],
-        [False, False],
-        [True, False], # Done after reward at index 2 for env 0
-        [False, True]  # Done after reward at index 3 for env 1
-    ])
+    dones = jnp.array(
+        [
+            [False, False],
+            [False, False],
+            [True, False],  # Done after reward at index 2 for env 0
+            [False, True],  # Done after reward at index 3 for env 1
+        ]
+    )
     T = rewards.shape[0]
 
     returns = rollout.calculate_returns(rewards, dones, gamma)
@@ -481,6 +556,7 @@ def test_calculate_returns(gamma):
     assert returns.shape == rewards.shape
     assert jnp.allclose(returns, expected_returns, atol=1e-6)
 
+
 def test_calculate_returns_immediate_done():
     """Test calculate_returns when an episode ends immediately."""
     gamma = 0.99
@@ -491,56 +567,66 @@ def test_calculate_returns_immediate_done():
     expected_returns = jnp.array([[1.0]])
     assert jnp.allclose(returns, expected_returns)
 
+
 @pytest.mark.parametrize("gamma, gae_lambda", [(0.99, 0.95), (1.0, 1.0), (0.9, 0.0)])
 def test_calculate_gae(gamma, gae_lambda):
     """Test GAE calculation with different gamma and lambda values."""
     # T=3, B=1
     rewards = jnp.array([[0.0], [0.0], [1.0]])
     # Values V(s0), V(s1), V(s2), V(s_terminal=s3)
-    values = jnp.array([[0.1], [0.2], [0.3], [0.0]]) # V(sT) usually 0
+    values = jnp.array([[0.1], [0.2], [0.3], [0.0]])  # V(sT) usually 0
     # Dones after step: done at step 3 (index 2)
     dones = jnp.array([[False], [False], [True]])
     T = rewards.shape[0]
 
-    advantages, returns = rollout.calculate_gae(rewards, values, dones, gamma, gae_lambda)
+    advantages, returns = rollout.calculate_gae(
+        rewards, values, dones, gamma, gae_lambda
+    )
 
     # Manual GAE calculation
     # delta_t = r_t - gamma * V(s_{t+1}) * (1 - d_t) - V(s_t)  # Corrected logic
     # A_t = delta_t - gamma * lambda * A_{t+1} * (1 - d_t)    # Corrected logic
-    v_t = values[:-1] # (T, B)
-    v_tp1 = values[1:] # (T, B)
+    v_t = values[:-1]  # (T, B)
+    v_tp1 = values[1:]  # (T, B)
     # Note: The minus signs reflect the zero-sum update
-    deltas = rewards - gamma * v_tp1 * (1.0 - dones.astype(jnp.float32)) - v_t # Corrected logic
+    deltas = (
+        rewards - gamma * v_tp1 * (1.0 - dones.astype(jnp.float32)) - v_t
+    )  # Corrected logic
     # delta[2] = 1.0 - gamma * 0.0 * (1 - 1) - 0.3 = 0.7
     # delta[1] = 0.0 - gamma * 0.3 * (1 - 0) - 0.2 = -0.3*gamma - 0.2
     # delta[0] = 0.0 - gamma * 0.2 * (1 - 0) - 0.1 = -0.2*gamma - 0.1
 
     adv = jnp.zeros_like(rewards)
-    gae_carry = 0.0 # Represents A_{t+1}
+    gae_carry = 0.0  # Represents A_{t+1}
     # Iterate backwards from T-1 down to 0
     for t in reversed(range(T)):
         # Note the minus sign for the carry term reflecting the zero-sum game logic
-        gae_t = deltas[t, 0] - gamma * gae_lambda * (1.0 - dones[t, 0]) * gae_carry # Corrected logic
+        gae_t = (
+            deltas[t, 0] - gamma * gae_lambda * (1.0 - dones[t, 0]) * gae_carry
+        )  # Corrected logic
         adv = adv.at[t, 0].set(gae_t)
-        gae_carry = gae_t # Update carry for next (previous time step) iteration
+        gae_carry = gae_t  # Update carry for next (previous time step) iteration
 
     expected_advantages = adv
-    expected_returns = expected_advantages + v_t # Returns calculation remains R_t = A_t + V(s_t)
+    expected_returns = (
+        expected_advantages + v_t
+    )  # Returns calculation remains R_t = A_t + V(s_t)
 
     assert advantages.shape == rewards.shape
     assert returns.shape == rewards.shape
     assert jnp.allclose(advantages, expected_advantages, atol=1e-6)
     assert jnp.allclose(returns, expected_returns, atol=1e-6)
 
+
 def test_calculate_gae_shapes():
     """Test shapes returned by calculate_gae."""
     T = 5
     B = 4
     rewards = jnp.zeros((T, B))
-    values = jnp.zeros((T + 1, B)) # Need T+1 values
+    values = jnp.zeros((T + 1, B))  # Need T+1 values
     dones = jnp.zeros((T, B), dtype=bool)
 
     advantages, returns = rollout.calculate_gae(rewards, values, dones)
 
     assert advantages.shape == (T, B)
-    assert returns.shape == (T, B) 
+    assert returns.shape == (T, B)

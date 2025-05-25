@@ -35,17 +35,21 @@ class PPOTrainer:
     """
 
     @staticmethod
-    def prepare_batch_for_update(batch_data: Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
-        """Reshapes arrays in the batch dictionary from (T, B, ...) to (T * B, ...) using jax.tree_map."""
-        
-        def _reshape_array(array_leaf: jnp.ndarray) -> jnp.ndarray:
-            if not hasattr(array_leaf, 'shape') or len(array_leaf.shape) < 2:
-                return array_leaf 
-            
-            T, B = array_leaf.shape[0], array_leaf.shape[1]
-            return lax.with_sharding_constraint(array_leaf.reshape((T * B,) + array_leaf.shape[2:]), mesh_rules("batch"))
+    def prepare_batch_for_update(
+        batch_data: Dict[str, jnp.ndarray],
+    ) -> Dict[str, jnp.ndarray]:
+        """Reshapes arrays in the batch dictionary from (T, B, ...) to (T * B, ...) using jax.tree.map."""
 
-        return jax.tree_map(_reshape_array, batch_data)
+        def _reshape_array(array_leaf: jnp.ndarray) -> jnp.ndarray:
+            if not hasattr(array_leaf, "shape") or len(array_leaf.shape) < 2:
+                return array_leaf
+
+            T, B = array_leaf.shape[0], array_leaf.shape[1]
+            return lax.with_sharding_constraint(
+                array_leaf.reshape((T * B,) + array_leaf.shape[2:]), mesh_rules("batch")
+            )
+
+        return jax.tree.map(_reshape_array, batch_data)
 
     @staticmethod
     def compute_gae_targets(
@@ -192,7 +196,7 @@ class PPOTrainer:
             opt_state: optax.OptState,
             optimizer: optax.GradientTransformation,
             model: ActorCritic,
-            minibatch: Dict[str, jnp.ndarray], # (N, ...)
+            minibatch: Dict[str, jnp.ndarray],  # (N, ...)
         ) -> Tuple[optax.Params, optax.OptState, Dict[str, jnp.ndarray]]:
             grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
             (loss, metrics), grads = grad_fn(params, minibatch)
@@ -204,7 +208,6 @@ class PPOTrainer:
 
         metrics_history = []
         total_data_points = full_batch["advantages"].size
-
 
         batch_size = total_data_points // config.num_minibatches
         effective_num_minibatches = config.num_minibatches

@@ -68,9 +68,9 @@ class GomokuJaxEnv(JaxEnvBase):
         )  # Shape (win_len, win_len, 4)
         # Reshape for lax.conv_general_dilated: (H, W, I, O) -> (H, W, 1, 4)
         kernels = jnp.expand_dims(kernels, axis=2)
-        return lax.with_sharding_constraint(kernels,mesh_rules("replicated"))
+        return lax.with_sharding_constraint(kernels, mesh_rules("replicated"))
 
-    def init_state(self)->GomokuState:
+    def init_state(self) -> GomokuState:
         """
         Creates the initial GomokuState.
 
@@ -82,14 +82,21 @@ class GomokuJaxEnv(JaxEnvBase):
         Returns:
             The initial GomokuState.
         """
-        return lax.with_sharding_constraint(GomokuState(
-            boards=jnp.zeros((self.B, self.board_size, self.board_size), dtype=jnp.float32),
-            current_players=jnp.ones((self.B,), dtype=jnp.int32),
-            dones=jnp.zeros((self.B,), dtype=jnp.bool_),
-            winners=jnp.zeros((self.B,), dtype=jnp.int32),
-        ),mesh_rules("batch"))
+        return lax.with_sharding_constraint(
+            GomokuState(
+                boards=jnp.zeros(
+                    (self.B, self.board_size, self.board_size), dtype=jnp.float32
+                ),
+                current_players=jnp.ones((self.B,), dtype=jnp.int32),
+                dones=jnp.zeros((self.B,), dtype=jnp.bool_),
+                winners=jnp.zeros((self.B,), dtype=jnp.int32),
+            ),
+            mesh_rules("batch"),
+        )
 
-    def _check_win(self, board: jnp.ndarray, current_players: jnp.ndarray) -> jnp.ndarray:
+    def _check_win(
+        self, board: jnp.ndarray, current_players: jnp.ndarray
+    ) -> jnp.ndarray:
         """
         Check for wins using convolution. Uses pre-computed kernels from self.
 
@@ -110,13 +117,13 @@ class GomokuJaxEnv(JaxEnvBase):
 
         conv_output = lax.conv_general_dilated(
             player_boards_nhwc,
-            self.win_kernels, # <-- Use pre-computed kernels from self
+            self.win_kernels,  # <-- Use pre-computed kernels from self
             window_strides=(1, 1),
             padding="SAME_LOWER",
-            dimension_numbers=self.win_kernels_dn, # <-- Use pre-computed DN from self
+            dimension_numbers=self.win_kernels_dn,  # <-- Use pre-computed DN from self
         )
 
-        win_condition = conv_output == self.win_length # <-- Use self.win_length
+        win_condition = conv_output == self.win_length  # <-- Use self.win_length
         wins = jnp.any(win_condition, axis=(1, 2, 3))  # Shape (B,)
         return wins
 
@@ -171,20 +178,21 @@ class GomokuJaxEnv(JaxEnvBase):
         # observations are player agnostic, representing the board state 1 for black and -1 for white.
         observations = new_boards
 
-        new_state = lax.with_sharding_constraint(GomokuState(
-            boards=new_boards,
-            current_players=next_players,
-            dones=new_dones,
-            winners=new_winners,
-        ),mesh_rules("batch"))
+        new_state = lax.with_sharding_constraint(
+            GomokuState(
+                boards=new_boards,
+                current_players=next_players,
+                dones=new_dones,
+                winners=new_winners,
+            ),
+            mesh_rules("batch"),
+        )
 
         info = {}
 
         return new_state, observations, rewards, new_dones, info
 
-    def reset(
-        self
-    ) -> Tuple[GomokuState, jnp.ndarray, Dict[str, Any]]:
+    def reset(self) -> Tuple[GomokuState, jnp.ndarray, Dict[str, Any]]:
         """
         Resets environments to initial states using the provided RNG key. Pure function.
 
@@ -218,13 +226,24 @@ class GomokuJaxEnv(JaxEnvBase):
 
         observations = jnp.zeros((max_steps, self.B) + obs_shape, dtype=jnp.float32)
         actions = jnp.zeros((max_steps, self.B) + act_shape, dtype=jnp.int32)
-        values = jnp.zeros((max_steps+1, self.B), dtype=jnp.float32)
+        values = jnp.zeros((max_steps + 1, self.B), dtype=jnp.float32)
         rewards = jnp.zeros((max_steps, self.B), dtype=jnp.float32)
         dones = jnp.zeros((max_steps, self.B), dtype=jnp.bool_)
         log_probs = jnp.zeros((max_steps, self.B), dtype=jnp.float32)
         current_players_buffer = jnp.zeros((max_steps, self.B), dtype=jnp.int32)
 
-        sharded_output = jax.tree.map(lambda x: lax.with_sharding_constraint(x,mesh_rules("buffer")), (observations, actions, values, rewards, dones, log_probs, current_players_buffer))
+        sharded_output = jax.tree.map(
+            lambda x: lax.with_sharding_constraint(x, mesh_rules("buffer")),
+            (
+                observations,
+                actions,
+                values,
+                rewards,
+                dones,
+                log_probs,
+                current_players_buffer,
+            ),
+        )
         return sharded_output
 
     # Properties match base class (still using @property for convenience)

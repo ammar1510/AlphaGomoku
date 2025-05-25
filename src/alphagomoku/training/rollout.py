@@ -18,7 +18,7 @@ class LoopState(NamedTuple):
     rewards: jnp.ndarray
     dones: jnp.ndarray
     logprobs: jnp.ndarray
-    current_players: jnp.ndarray  
+    current_players: jnp.ndarray
     step_idx: int
     rng: jax.random.PRNGKey
     termination_step_indices: (
@@ -33,18 +33,14 @@ def player_move(
     """Takes a single step in the environment using the provided actor-critic."""
     current_state: EnvState = loop_state.state
     current_obs: jnp.ndarray = loop_state.obs
-    current_player: jnp.ndarray = (
-        current_state.current_players
-    ) 
+    current_player: jnp.ndarray = current_state.current_players
     step_idx: int = loop_state.step_idx
     rng = loop_state.rng
 
     # Get policy distribution and value from the model
-    pi_dist, value = actor_critic.apply(
-        {"params": params}, current_obs, current_player
-    ) 
-    lax.with_sharding_constraint(pi_dist.logits,mesh_rules("batch"))
-    lax.with_sharding_constraint(value,mesh_rules("batch"))
+    pi_dist, value = actor_critic.apply({"params": params}, current_obs, current_player)
+    lax.with_sharding_constraint(pi_dist.logits, mesh_rules("batch"))
+    lax.with_sharding_constraint(value, mesh_rules("batch"))
 
     # Get action mask from the environment
     action_mask = env.get_action_mask(current_state)  # (B, H, W)
@@ -205,13 +201,19 @@ def run_episode(
     initial_state, initial_obs, _ = env.reset()
 
     buffers = env.initialize_trajectory_buffers(buffer_size)
-    observations, actions, values, rewards, dones_buffer, logprobs, current_players_buffer = (
-        buffers  # Unpack players buffer
-    )
+    (
+        observations,
+        actions,
+        values,
+        rewards,
+        dones_buffer,
+        logprobs,
+        current_players_buffer,
+    ) = buffers  # Unpack players buffer
     B = initial_obs.shape[0]  # Infer batch size
-    initial_termination_indices = lax.with_sharding_constraint(jnp.full(
-        (B,), jnp.iinfo(jnp.int32).max, dtype=jnp.int32
-    ),mesh_rules("batch"))
+    initial_termination_indices = lax.with_sharding_constraint(
+        jnp.full((B,), jnp.iinfo(jnp.int32).max, dtype=jnp.int32), mesh_rules("batch")
+    )
 
     initial_loop_state = LoopState(
         state=initial_state,
@@ -222,7 +224,7 @@ def run_episode(
         rewards=rewards,
         dones=dones_buffer,
         logprobs=logprobs,
-        current_players=current_players_buffer, 
+        current_players=current_players_buffer,
         step_idx=0,
         rng=rng,
         termination_step_indices=initial_termination_indices,  # Initialize termination indices
@@ -263,23 +265,25 @@ def run_episode(
 
     final_state = lax.while_loop(cond_fn, body_fn_wrapped, initial_loop_state)
 
-    #final value needed for GAE calculation
+    # final value needed for GAE calculation
     final_value = final_state.values[-1]
     final_values = final_state.values.at[-1].set(final_value)
-
-
 
     term_indices = final_state.termination_step_indices  # Shape (B,)
     T = final_state.step_idx  # Use actual steps taken up to buffer_size
     B = initial_obs.shape[0]
 
     # Ensure T is used correctly for the mask dimensions even if less than buffer_size
-    step_indices = lax.with_sharding_constraint(jnp.arange(buffer_size)[:, None],mesh_rules("replicated"))  # Shape (buffer_size, 1)
+    step_indices = lax.with_sharding_constraint(
+        jnp.arange(buffer_size)[:, None], mesh_rules("replicated")
+    )  # Shape (buffer_size, 1)
 
     # Broadcast comparison: mask is True if step_index <= termination_index
     # Using '<=' ensures the terminal step itself is included as valid
     # We create a mask for the full buffer size
-    valid_mask = lax.with_sharding_constraint(step_indices <= term_indices[None, :],mesh_rules("buffer"))  # Shape (buffer_size, B)
+    valid_mask = lax.with_sharding_constraint(
+        step_indices <= term_indices[None, :], mesh_rules("buffer")
+    )  # Shape (buffer_size, B)
 
     full_trajectory = {
         # Use the full buffers
@@ -400,7 +404,9 @@ def calculate_gae(
     scan_inputs = (deltas, dones)  # Structure: ((T, B), (T, B))
 
     # Initial carry state for the scan needs to match the batch dimension
-    initial_carry = lax.with_sharding_constraint(jnp.zeros(B),mesh_rules("batch"))  # Shape (B,)
+    initial_carry = lax.with_sharding_constraint(
+        jnp.zeros(B), mesh_rules("batch")
+    )  # Shape (B,)
 
     # Scan over axis 0 (time) in reverse.
     # Inputs structure ((T, B), (T, B)), step_data_batch will be ((B,), (B,))
