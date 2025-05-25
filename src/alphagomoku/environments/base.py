@@ -61,13 +61,10 @@ class JaxEnvBase(abc.ABC):
 
     @abc.abstractmethod
     def reset(
-        self, rng: jax.random.PRNGKey
+        self
     ) -> Tuple[EnvState, jnp.ndarray, Dict[str, Any]]:
         """
         Creates an initial environment state. Pure function.
-
-        Args:
-            rng: A JAX PRNGKey for initializing the state.
 
         Returns:
             A tuple (initial_state, initial_observations, info):

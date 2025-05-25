@@ -21,9 +21,7 @@ class LoopState(NamedTuple):
     current_players: jnp.ndarray
     step_idx: int
     rng: jax.random.PRNGKey
-    termination_step_indices: (
-        jnp.ndarray
-    )  # Stores the step index 't' when done first becomes True for each batch element
+    termination_step_indices: jnp.ndarray  # Stores the step index 't' when done first becomes True for each batch element
 
 
 @partial(jit, static_argnames=["env", "actor_critic"])

@@ -4,7 +4,7 @@ import jax.lax as lax
 import optax
 from dataclasses import dataclass
 from functools import partial
-from typing import Dict, Tuple, Any, Optional, Callable
+from typing import Dict, Tuple
 
 from alphagomoku.models.gomoku.actor_critic import ActorCritic
 from alphagomoku.training.rollout import calculate_gae
