@@ -6,6 +6,7 @@ from typing import Dict, Any, Tuple, NamedTuple
 import distrax  # Added import
 
 from alphagomoku.environments.base import JaxEnvBase, EnvState
+from alphagomoku.training.sharding import mesh_rules
 
 
 class LoopState(NamedTuple):
@@ -42,6 +43,8 @@ def player_move(
     pi_dist, value = actor_critic.apply(
         {"params": params}, current_obs, current_player
     ) 
+    lax.with_sharding_constraint(pi_dist.logits,mesh_rules("batch"))
+    lax.with_sharding_constraint(value,mesh_rules("batch"))
 
     # Get action mask from the environment
     action_mask = env.get_action_mask(current_state)  # (B, H, W)
@@ -122,7 +125,7 @@ def player_move(
 #         rng: Updated random key
 #     """
 #     initial_rng, reset_rng = jax.random.split(rng)
-#     initial_state, initial_obs, _ = env.reset(reset_rng)
+#     initial_state, initial_obs, _ = env.reset()
 #
 #     buffers = env.initialize_trajectory_buffers(buffer_size)
 #     observations, actions, rewards, dones_buffer, logprobs = buffers
@@ -199,17 +202,16 @@ def run_episode(
     Note: This function can simulate the behavior of `run_selfplay` function
           by passing the same actor_critic model and params for both the black and white players.
     """
-    initial_rng, reset_rng = jax.random.split(rng)
-    initial_state, initial_obs, _ = env.reset(reset_rng)
+    initial_state, initial_obs, _ = env.reset()
 
     buffers = env.initialize_trajectory_buffers(buffer_size)
     observations, actions, values, rewards, dones_buffer, logprobs, current_players_buffer = (
         buffers  # Unpack players buffer
     )
     B = initial_obs.shape[0]  # Infer batch size
-    initial_termination_indices = jnp.full(
+    initial_termination_indices = lax.with_sharding_constraint(jnp.full(
         (B,), jnp.iinfo(jnp.int32).max, dtype=jnp.int32
-    )
+    ),mesh_rules("batch"))
 
     initial_loop_state = LoopState(
         state=initial_state,
@@ -222,7 +224,7 @@ def run_episode(
         logprobs=logprobs,
         current_players=current_players_buffer, 
         step_idx=0,
-        rng=initial_rng,
+        rng=rng,
         termination_step_indices=initial_termination_indices,  # Initialize termination indices
     )
 
@@ -272,12 +274,12 @@ def run_episode(
     B = initial_obs.shape[0]
 
     # Ensure T is used correctly for the mask dimensions even if less than buffer_size
-    step_indices = jnp.arange(buffer_size)[:, None]  # Shape (buffer_size, 1)
+    step_indices = lax.with_sharding_constraint(jnp.arange(buffer_size)[:, None],mesh_rules("replicated"))  # Shape (buffer_size, 1)
 
     # Broadcast comparison: mask is True if step_index <= termination_index
     # Using '<=' ensures the terminal step itself is included as valid
     # We create a mask for the full buffer size
-    valid_mask = step_indices <= term_indices[None, :]  # Shape (buffer_size, B)
+    valid_mask = lax.with_sharding_constraint(step_indices <= term_indices[None, :],mesh_rules("buffer"))  # Shape (buffer_size, B)
 
     full_trajectory = {
         # Use the full buffers
@@ -292,10 +294,9 @@ def run_episode(
         "T": T,  # Actual number of steps executed (can be less than buffer_size)
         "termination_step_indices": final_state.termination_step_indices,  # Keep this too if needed elsewhere
     }
-    rng = final_state.rng
 
     # Return the final EnvState directly, contains final_obs and final_player
-    return full_trajectory, final_state.state, rng
+    return full_trajectory
 
 
 # --- Utility functions for GAE/Returns (remain the same, check types) ---
@@ -399,7 +400,7 @@ def calculate_gae(
     scan_inputs = (deltas, dones)  # Structure: ((T, B), (T, B))
 
     # Initial carry state for the scan needs to match the batch dimension
-    initial_carry = jnp.zeros(B)  # Shape (B,)
+    initial_carry = lax.with_sharding_constraint(jnp.zeros(B),mesh_rules("batch"))  # Shape (B,)
 
     # Scan over axis 0 (time) in reverse.
     # Inputs structure ((T, B), (T, B)), step_data_batch will be ((B,), (B,))

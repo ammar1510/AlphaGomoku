@@ -18,6 +18,7 @@ from alphagomoku.environments.gomoku import GomokuJaxEnv, GomokuState
 from alphagomoku.models.gomoku.actor_critic import ActorCritic
 from alphagomoku.policy.ppo import PPOConfig, PPOTrainer
 from alphagomoku.training.rollout import run_episode, LoopState
+from alphagomoku.training.sharding import mesh_rules
 
 
 # --- Configure Logging ---
@@ -92,6 +93,8 @@ def train(cfg: DictConfig):
 
     black_params = black_model.init(model_rng_b, dummy_obs, dummy_player)["params"]
     white_params = white_model.init(model_rng_w, dummy_obs, dummy_player)["params"]
+    black_params = jax.device_put(black_params,mesh_rules.replicated)
+    white_params = jax.device_put(white_params,mesh_rules.replicated)
 
     # === Optimizer Setup (Separate Black and White) ===
     total_updates = cfg.num_epochs
@@ -131,7 +134,7 @@ def train(cfg: DictConfig):
         num_minibatches=cfg.ppo.num_minibatches,
         seed=cfg.seed, # Seed for internal shuffling if needed
     )
-    ppo_trainer = PPOTrainer(config=ppo_config)
+    ppo_trainer = PPOTrainer()
 
     # Checkpointing Setup
     checkpoint_path = os.path.join(artifacts_dir, cfg.checkpoint_dir) # Use configured dir directly
@@ -200,22 +203,42 @@ def train(cfg: DictConfig):
         white_train_state = white_train_state.replace(update_step=0)
 
 
-    # --- Pre-compile Update Steps --- 
-    # Partially apply the static model argument and JIT compile specialized 
-    # update functions to avoid recompilation within the loop.
+    # --- Pre-compile functions--- 
+
+    logger.info("Compiling rollout function...")
+    jit_rollout = jax.jit(
+        partial(run_episode, env=env, black_actor_critic=black_model, white_actor_critic=white_model),
+        static_argnames=['env', 'black_actor_critic', 'white_actor_critic']
+    )
+    logger.info("Rollout function compiled.")
+
     logger.info("Compiling update function for black agent...")
-    # Mark 'optimizer' and 'config' as static in the outer JIT as well
-    partial_update_step_black = jax.jit(
+    jit_update_step_black = jax.jit(
         partial(PPOTrainer.update_step, model=black_model), 
         static_argnames=['optimizer', 'config']
     )
     logger.info("Compiling update function for white agent...")
-    # Mark 'optimizer' and 'config' as static in the outer JIT as well
-    partial_update_step_white = jax.jit(
+    jit_update_step_white = jax.jit(
         partial(PPOTrainer.update_step, model=white_model),
         static_argnames=['optimizer', 'config']
     )
     logger.info("Update functions compiled.")
+
+    logger.info("Compiling GAE calculation function...")
+    jit_ppo_gae = jax.jit(
+        partial(PPOTrainer.compute_gae_targets, gamma=cfg.ppo.gamma, gae_lambda=cfg.ppo.gae_lambda),
+        static_argnames=['gamma', 'gae_lambda']
+    )
+    logger.info("GAE calculation function compiled.")
+
+    logger.info("Compiling PPO prepare batch for update function...")
+    jit_prepare_batch = jax.jit(
+        partial(PPOTrainer.prepare_batch_for_update),
+        static_argnames=['config']
+    )
+    logger.info("Prepare batch for update function compiled.")
+
+
 
     # --- Training Loop --- (Iterates over epochs)
     logger.info(
@@ -223,7 +246,7 @@ def train(cfg: DictConfig):
     )
 
     # Initialize environment state outside the loop
-    env_state, current_obs, _ = env.reset(env_rng)
+    env_state, current_obs, _ = env.reset()
 
     for epoch in range(start_epoch, cfg.num_epochs):
         iter_start_time = time.time()
@@ -237,7 +260,7 @@ def train(cfg: DictConfig):
         # Split black's RNG for rollout and its own update
         rollout_rng, black_rng_current = jax.random.split(black_rng_current)
 
-        full_trajectory, final_env_state, _ = run_episode( # Rollout RNG is consumed here
+        full_trajectory = jit_rollout( # Rollout RNG is consumed here
             env=env,
             black_actor_critic=black_model,
             black_params=black_params_current,
@@ -255,7 +278,7 @@ def train(cfg: DictConfig):
         total_env_steps += steps_this_iter
 
         # === GAE Calculation Phase (Same for both perspectives initially) ===
-        advantages, returns = ppo_trainer.compute_gae_targets(
+        advantages, returns = jit_ppo_gae(
             rewards=full_trajectory["rewards"],
             values=full_trajectory["values"], # Values are V(s) from the *current* player's perspective
             dones=full_trajectory["dones"],
@@ -276,7 +299,8 @@ def train(cfg: DictConfig):
         }
 
         # Prepare batch reshapes (T, B, ...) -> (T * B, ...)
-        prepared_batch_flat = PPOTrainer.prepare_batch_for_update(batch_data)
+        prepared_batch_flat = jit_prepare_batch(batch_data)
+        prepared_batch_flat = jax.device_put(prepared_batch_flat, mesh_rules("batch"))
 
         # === Update Phase (Separate for Black and White using Masks) ===
 
@@ -309,7 +333,7 @@ def train(cfg: DictConfig):
             black_params_updated,
             black_opt_state_updated,
             black_update_metrics,
-        ) = partial_update_step_black( # Call the pre-jitted black version
+        ) = jit_update_step_black( # Call the pre-jitted black version
             rng=update_rng_black,
             params=black_params_current,
             optimizer=black_tx,
@@ -339,7 +363,7 @@ def train(cfg: DictConfig):
             white_params_updated,
             white_opt_state_updated,
             white_update_metrics,
-        ) = partial_update_step_white( # Call the pre-jitted white version
+        ) = jit_update_step_white( # Call the pre-jitted white version
             rng=update_rng_white,
             params=white_params_current,
             optimizer=white_tx,
