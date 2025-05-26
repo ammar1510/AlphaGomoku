@@ -33,17 +33,18 @@ logging.getLogger("absl").setLevel(logging.WARNING)
 
 
 # --- Evaluation Function ---
-def run_evaluation(
-    eval_env: GomokuJaxEnv,
+def run_evaluation_games(
+    eval_env: GomokuJaxEnv, # Changed to accept a dedicated eval_env
     black_actor_critic: ActorCritic,
     black_params: Any,
     white_actor_critic: ActorCritic,
     white_params: Any,
     rng: jax.random.PRNGKey,
+    # board_size: int, # Removed, will use eval_env.board_size
 ) -> Dict[str, Any]:
     """Runs a set of evaluation games between two agents using a dedicated evaluation environment."""
     num_eval_games = eval_env.B # Number of games is determined by the eval_env's batch size
-    board_size = eval_env.board_size
+    # logger.info(f"Running {num_eval_games} evaluation games...") # This log is now in the main loop
 
     eval_rng, _ = jax.random.split(rng)
 
@@ -54,7 +55,7 @@ def run_evaluation(
         white_actor_critic=white_actor_critic,
         white_params=white_params,
         rng=eval_rng,
-        buffer_size=board_size * board_size,
+        buffer_size=eval_env.board_size * eval_env.board_size, # Use board_size from eval_env
     )
 
     terminated_mask = game_trajectory["dones"]
@@ -80,6 +81,8 @@ def run_evaluation(
         "eval/white_win_rate": (white_wins / num_eval_games) if num_eval_games > 0 else 0.0,
         "eval/draw_rate": (draws / num_eval_games) if num_eval_games > 0 else 0.0,
     }
+    # logger.info(f"Evaluation results: {metrics}") # More detailed logging will be done in the main loop
+    # This function's primary role is to return the metrics dict.
     return metrics
 
 
@@ -337,7 +340,7 @@ def train(cfg: DictConfig):
 
     logger.info("Compiling evaluation function...")
     jit_eval = jax.jit(
-        run_evaluation,
+        run_evaluation_games,
         static_argnames=["eval_env", "black_actor_critic", "white_actor_critic"],
     )
     logger.info("Evaluation function compiled.")
@@ -567,9 +570,20 @@ def train(cfg: DictConfig):
                 white_actor_critic=white_model,
                 white_params=white_train_state.params,
                 rng=eval_rng_key,
-                board_size=cfg.gomoku.board_size # board_size is still needed for buffer_size in run_episode
             )
-            logger.info(f"Evaluation results: {eval_metrics}")
+            bw = eval_metrics["eval/black_wins"]
+            ww = eval_metrics["eval/white_wins"]
+            dr = eval_metrics["eval/draws"]
+            tg = eval_metrics["eval/total_games_played"]
+            bwp = eval_metrics["eval/black_win_rate"] * 100
+            wwp = eval_metrics["eval/white_win_rate"] * 100
+            drp = eval_metrics["eval/draw_rate"] * 100
+            logger.info(
+                f"Evaluation epoch {eval_epoch} results (over {tg} games): "
+                f"Black Wins: {bw} ({bwp:.2f}%), "
+                f"White Wins: {ww} ({wwp:.2f}%), "
+                f"Draws: {dr} ({drp:.2f}%)"
+            )
             wandb.log(eval_metrics, step=total_env_steps) # Evaluation metrics logged here
 
 
