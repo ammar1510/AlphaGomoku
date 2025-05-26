@@ -32,6 +32,57 @@ logging.basicConfig(
 logging.getLogger("absl").setLevel(logging.WARNING)
 
 
+# --- Evaluation Function ---
+def run_evaluation(
+    eval_env: GomokuJaxEnv,
+    black_actor_critic: ActorCritic,
+    black_params: Any,
+    white_actor_critic: ActorCritic,
+    white_params: Any,
+    rng: jax.random.PRNGKey,
+) -> Dict[str, Any]:
+    """Runs a set of evaluation games between two agents using a dedicated evaluation environment."""
+    num_eval_games = eval_env.B # Number of games is determined by the eval_env's batch size
+    board_size = eval_env.board_size
+
+    eval_rng, _ = jax.random.split(rng)
+
+    game_trajectory = run_episode(
+        env=eval_env, # Use the dedicated evaluation environment
+        black_actor_critic=black_actor_critic,
+        black_params=black_params,
+        white_actor_critic=white_actor_critic,
+        white_params=white_params,
+        rng=eval_rng,
+        buffer_size=board_size * board_size,
+    )
+
+    terminated_mask = game_trajectory["dones"]
+    final_rewards = game_trajectory["rewards"]
+    final_players = game_trajectory["current_players"]
+
+    term_indices = jnp.argmax(terminated_mask, axis=0)
+    rewards_at_termination = jnp.take_along_axis(final_rewards, term_indices[jnp.newaxis, :], axis=0).squeeze(0)
+    player_at_termination = jnp.take_along_axis(final_players, term_indices[jnp.newaxis, :], axis=0).squeeze(0)
+
+    black_wins = jnp.sum((player_at_termination == 1) & (rewards_at_termination == 1))
+    white_wins = jnp.sum((player_at_termination == -1) & (rewards_at_termination == 1))
+    
+    # num_actual_games_played is now simply num_eval_games (eval_env.B)
+    draws = num_eval_games - black_wins - white_wins
+
+    metrics = {
+        "eval/black_wins": black_wins,
+        "eval/white_wins": white_wins,
+        "eval/draws": draws,
+        "eval/total_games_played": num_eval_games,
+        "eval/black_win_rate": (black_wins / num_eval_games) if num_eval_games > 0 else 0.0,
+        "eval/white_win_rate": (white_wins / num_eval_games) if num_eval_games > 0 else 0.0,
+        "eval/draw_rate": (draws / num_eval_games) if num_eval_games > 0 else 0.0,
+    }
+    return metrics
+
+
 # --- Training State ---
 class TrainingState(train_state.TrainState):
     # Inherits apply_fn, params, tx, opt_state
@@ -76,7 +127,7 @@ def train(cfg: DictConfig):
         sync_tensorboard=True,
         reinit=True,
     )
-    print(f"WandB Run URL: {run.get_url()}")
+    print(f"WandB Run URL: {run.url}")
 
     # RNG Setup
     rng = jax.random.PRNGKey(cfg.seed)
@@ -87,6 +138,12 @@ def train(cfg: DictConfig):
     # Environment Setup
     env = GomokuJaxEnv(
         B=cfg.num_envs,
+        board_size=cfg.gomoku.board_size,
+        win_length=cfg.gomoku.win_length,
+    )
+    # Create a separate environment for evaluation
+    eval_env = GomokuJaxEnv(
+        B=cfg.eval_games, # Use eval_games for the batch size
         board_size=cfg.gomoku.board_size,
         win_length=cfg.gomoku.win_length,
     )
@@ -278,6 +335,13 @@ def train(cfg: DictConfig):
     )
     logger.info("GAE calculation function compiled.")
 
+    logger.info("Compiling evaluation function...")
+    jit_eval = jax.jit(
+        run_evaluation,
+        static_argnames=["eval_env", "black_actor_critic", "white_actor_critic"],
+    )
+    logger.info("Evaluation function compiled.")
+
     logger.info("Compiling PPO prepare batch for update function...")
     jit_prepare_batch = jax.jit(PPOTrainer.prepare_batch_for_update)
     logger.info("Prepare batch for update function compiled.")
@@ -429,45 +493,15 @@ def train(cfg: DictConfig):
             update_step=epoch + 1,
         )
 
-        # === Logging Phase ===
-        iter_end_time = time.time()
-        sps = (
-            steps_this_iter / (iter_end_time - iter_start_time)
-            if iter_end_time > iter_start_time and steps_this_iter > 0
-            else 0
-        )
-
-        # Log combined and agent-specific metrics
-        log_data = {
-            "train/epoch": epoch + 1,
-            "train/total_env_steps": total_env_steps,
-            "train/sps": sps,
-            "train/duration_s": iter_end_time - iter_start_time,
-            "train/steps_this_epoch": steps_this_iter,
-            "rollout/avg_episode_length": jnp.mean(
-                full_trajectory["termination_step_indices"].astype(jnp.float32)
-            ),
-        }
-
-        # Add black agent metrics
-        for k, v in black_update_metrics.items():
-            log_data[f"ppo_black/{k}"] = v
-
-        # Add white agent metrics
-        for k, v in white_update_metrics.items():
-            log_data[f"ppo_white/{k}"] = v
-
-        wandb.log(log_data, step=total_env_steps)
-
         # === Checkpointing Phase ===
-        current_epoch = epoch + 1  # Use epoch number for checkpoint step counter
+        save_epoch = epoch + 1  # Use epoch number for checkpoint step counter
         if (
-            current_epoch % cfg.save_frequency == 0
-            and current_epoch
+            save_epoch % cfg.save_frequency == 0
+            and save_epoch
             > start_epoch  # Avoid saving initial state immediately if resuming
         ):
             logger.info(
-                f"Saving checkpoint at epoch {current_epoch} (total env steps ~{total_env_steps})..."
+                f"Saving checkpoint at epoch {save_epoch} (total env steps ~{total_env_steps})..."
             )
             # Create a combined dictionary containing both states
             save_data = {
@@ -491,17 +525,63 @@ def train(cfg: DictConfig):
                 black=ocp.args.StandardSave(save_data["black"]),
                 white=ocp.args.StandardSave(save_data["white"]),
             )
-            checkpointer.save(current_epoch, args=save_args, force=True)
+            checkpointer.save(save_epoch, args=save_args, force=True)
             logger.info("Checkpoint saved.")
+
+            # --- Construct and Log Training Data --- 
+            # Calculate iteration-specific metrics only when logging
+            iter_end_time = time.time()
+            sps = steps_this_iter / (iter_end_time - iter_start_time)
+            log_data = {
+                "train/epoch": save_epoch, # Use save_epoch here
+                "train/total_env_steps": total_env_steps,
+                "train/sps": sps,
+                "train/duration_s": iter_end_time - iter_start_time,
+                "train/steps_this_epoch": steps_this_iter,
+                "rollout/avg_episode_length": jnp.mean(
+                    full_trajectory["termination_step_indices"].astype(jnp.float32)
+                ),
+            }
+            # Add black agent metrics
+            for k, v in black_update_metrics.items():
+                log_data[f"ppo_black/{k}"] = v
+            # Add white agent metrics
+            for k, v in white_update_metrics.items():
+                log_data[f"ppo_white/{k}"] = v
+
+            wandb.log(log_data, step=total_env_steps) # Log training data when checkpointing
+
+
+
+        # === Evaluation Phase ===
+        eval_epoch = epoch + 1
+        if eval_epoch % cfg.eval_frequency == 0:
+            logger.info(f"Running evaluation at epoch {eval_epoch}...")
+            rng, eval_rng_key = jax.random.split(rng)
+
+            logger.info(f"Running {cfg.eval_games} evaluation games...")
+            eval_metrics = jit_eval(
+                eval_env=eval_env, # Pass the dedicated evaluation environment
+                black_actor_critic=black_model,
+                black_params=black_train_state.params,
+                white_actor_critic=white_model,
+                white_params=white_train_state.params,
+                rng=eval_rng_key,
+                board_size=cfg.gomoku.board_size # board_size is still needed for buffer_size in run_episode
+            )
+            logger.info(f"Evaluation results: {eval_metrics}")
+            wandb.log(eval_metrics, step=total_env_steps) # Evaluation metrics logged here
+
+
 
     # --- Final Cleanup ---
     logger.info("Waiting for checkpointer...")
     checkpointer.wait_until_finished()
     checkpointer.close()
     logger.info("Closing WandB run...")
-    wandb.finish()
     total_time = time.time() - start_time
     logger.info(f"Training finished in {total_time:.2f} seconds.")
+    wandb.finish()
 
 
 train()

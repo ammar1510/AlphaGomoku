@@ -1,0 +1,3 @@
+# @package gomoku
+board_size: 15
+win_length: 5
