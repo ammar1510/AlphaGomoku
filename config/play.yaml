@@ -7,7 +7,7 @@ defaults:
 # Hydra settings
 hydra:
   run:
-    dir: ./outputs/play/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: ./artifacts/outputs/play/${now:%Y-%m-%d}/${now:%H-%M-%S}
   job:
     name: interactive_play
 

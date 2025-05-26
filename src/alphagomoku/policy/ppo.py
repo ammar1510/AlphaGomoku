@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import jax.lax as lax
 import optax
 from dataclasses import dataclass
 from functools import partial
@@ -7,6 +8,7 @@ from typing import Dict, Tuple, Any, Optional, Callable
 
 from alphagomoku.models.gomoku.actor_critic import ActorCritic
 from alphagomoku.training.rollout import calculate_gae
+from alphagomoku.training.sharding import mesh_rules
 
 
 @dataclass(frozen=True)
@@ -32,30 +34,24 @@ class PPOTrainer:
     trajectory generation, data preparation, and state management.
     """
 
-    def __init__(self, config: PPOConfig):
-        """
-        Initialize the PPO trainer components.
+    @staticmethod
+    def prepare_batch_for_update(
+        batch_data: Dict[str, jnp.ndarray],
+    ) -> Dict[str, jnp.ndarray]:
+        """Reshapes arrays in the batch dictionary from (T, B, ...) to (T * B, ...) using jax.tree.map."""
 
-        Args:
-            config: PPO configuration parameters.
-        """
-        self.config = config
+        def _reshape_array(array_leaf: jnp.ndarray) -> jnp.ndarray:
+            if not hasattr(array_leaf, "shape") or len(array_leaf.shape) < 2:
+                return array_leaf
+
+            T, B = array_leaf.shape[0], array_leaf.shape[1]
+            return lax.with_sharding_constraint(
+                array_leaf.reshape((T * B,) + array_leaf.shape[2:]), mesh_rules("batch")
+            )
+
+        return jax.tree.map(_reshape_array, batch_data)
 
     @staticmethod
-    def prepare_batch_for_update(batch_data: Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
-        """Reshapes arrays in the batch dictionary from (T, B, ...) to (T * B, ...)."""
-        reshaped_batch = {}
-        for key, value in batch_data.items():
-            if isinstance(value, jnp.ndarray):
-                T, B = value.shape[0], value.shape[1]
-                reshaped_batch[key] = value.reshape((T * B,) + value.shape[2:])
-            else:
-                # Handling non-arrays
-                reshaped_batch[key] = value
-        return reshaped_batch
-
-    @staticmethod
-    @jax.jit
     def compute_gae_targets(
         rewards: jnp.ndarray,
         values: jnp.ndarray,
@@ -93,7 +89,6 @@ class PPOTrainer:
         return advantages_normalized, returns
 
     @staticmethod
-    @partial(jax.jit, static_argnames=['model', 'optimizer', 'config'])
     def update_step(
         rng: jax.random.PRNGKey,
         model: ActorCritic,
@@ -201,7 +196,7 @@ class PPOTrainer:
             opt_state: optax.OptState,
             optimizer: optax.GradientTransformation,
             model: ActorCritic,
-            minibatch: Dict[str, jnp.ndarray], # (N, ...)
+            minibatch: Dict[str, jnp.ndarray],  # (N, ...)
         ) -> Tuple[optax.Params, optax.OptState, Dict[str, jnp.ndarray]]:
             grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
             (loss, metrics), grads = grad_fn(params, minibatch)
@@ -213,7 +208,6 @@ class PPOTrainer:
 
         metrics_history = []
         total_data_points = full_batch["advantages"].size
-
 
         batch_size = total_data_points // config.num_minibatches
         effective_num_minibatches = config.num_minibatches

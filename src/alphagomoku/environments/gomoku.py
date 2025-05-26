@@ -5,6 +5,7 @@ from typing import Tuple, Dict, Any, NamedTuple, Optional
 from functools import partial
 
 from .base import JaxEnvBase, EnvState
+from alphagomoku.training.sharding import mesh_rules
 
 # --- Constants and Kernel Generation ---
 WIN_LENGTH = 5
@@ -18,7 +19,6 @@ class GomokuState(NamedTuple):
     current_players: jnp.ndarray  # (B,) int32 tensor (1 or -1)
     dones: jnp.ndarray  # (B,) bool tensor
     winners: jnp.ndarray  # (B,) int32 tensor (1, -1, or 0 for draw/ongoing)
-    rng: jax.random.PRNGKey  # JAX PRNGKey
 
 
 # --- Environment Logic ---
@@ -50,8 +50,6 @@ class GomokuJaxEnv(JaxEnvBase):
         self.win_kernels = GomokuJaxEnv._create_win_kernels(self.win_length)
         self.win_kernels_dn = ("NHWC", "HWIO", "NHWC")
 
-    @staticmethod
-    @partial(jax.jit, static_argnums=(0,))
     def _create_win_kernels(win_len: int = WIN_LENGTH):
         """Create convolution kernels for win detection."""
         # Horizontal kernel
@@ -70,11 +68,9 @@ class GomokuJaxEnv(JaxEnvBase):
         )  # Shape (win_len, win_len, 4)
         # Reshape for lax.conv_general_dilated: (H, W, I, O) -> (H, W, 1, 4)
         kernels = jnp.expand_dims(kernels, axis=2)
-        return kernels
+        return lax.with_sharding_constraint(kernels, mesh_rules("replicated"))
 
-    @staticmethod
-    @partial(jax.jit, static_argnames=("B", "board_size"))
-    def init_state(rng: jax.random.PRNGKey, B: int, board_size: int) -> GomokuState:
+    def init_state(self) -> GomokuState:
         """
         Creates the initial GomokuState.
 
@@ -86,16 +82,21 @@ class GomokuJaxEnv(JaxEnvBase):
         Returns:
             The initial GomokuState.
         """
-        return GomokuState(
-            boards=jnp.zeros((B, board_size, board_size), dtype=jnp.float32),
-            current_players=jnp.ones((B,), dtype=jnp.int32),
-            dones=jnp.zeros((B,), dtype=jnp.bool_),
-            winners=jnp.zeros((B,), dtype=jnp.int32),
-            rng=rng,
+        return lax.with_sharding_constraint(
+            GomokuState(
+                boards=jnp.zeros(
+                    (self.B, self.board_size, self.board_size), dtype=jnp.float32
+                ),
+                current_players=jnp.ones((self.B,), dtype=jnp.int32),
+                dones=jnp.zeros((self.B,), dtype=jnp.bool_),
+                winners=jnp.zeros((self.B,), dtype=jnp.int32),
+            ),
+            mesh_rules("batch"),
         )
 
-    @partial(jax.jit, static_argnames=("self",))
-    def _check_win(self, board: jnp.ndarray, current_players: jnp.ndarray) -> jnp.ndarray:
+    def _check_win(
+        self, board: jnp.ndarray, current_players: jnp.ndarray
+    ) -> jnp.ndarray:
         """
         Check for wins using convolution. Uses pre-computed kernels from self.
 
@@ -116,17 +117,16 @@ class GomokuJaxEnv(JaxEnvBase):
 
         conv_output = lax.conv_general_dilated(
             player_boards_nhwc,
-            self.win_kernels, # <-- Use pre-computed kernels from self
+            self.win_kernels,  # <-- Use pre-computed kernels from self
             window_strides=(1, 1),
             padding="SAME_LOWER",
-            dimension_numbers=self.win_kernels_dn, # <-- Use pre-computed DN from self
+            dimension_numbers=self.win_kernels_dn,  # <-- Use pre-computed DN from self
         )
 
-        win_condition = conv_output == self.win_length # <-- Use self.win_length
+        win_condition = conv_output == self.win_length  # <-- Use self.win_length
         wins = jnp.any(win_condition, axis=(1, 2, 3))  # Shape (B,)
         return wins
 
-    @partial(jax.jit, static_argnames=("self",))
     def step(
         self, state: GomokuState, actions: jnp.ndarray
     ) -> Tuple[GomokuState, jnp.ndarray, jnp.ndarray, jnp.ndarray, Dict[str, Any]]:
@@ -148,7 +148,6 @@ class GomokuJaxEnv(JaxEnvBase):
         current_players = state.current_players
         current_dones = state.dones
         current_winners = state.winners
-        current_rng = state.rng
 
         # make a move
         valid_move = (current_boards[jnp.arange(B), rows, cols] == 0) & (~current_dones)
@@ -179,33 +178,31 @@ class GomokuJaxEnv(JaxEnvBase):
         # observations are player agnostic, representing the board state 1 for black and -1 for white.
         observations = new_boards
 
-        new_state = GomokuState(
-            boards=new_boards,
-            current_players=next_players,
-            dones=new_dones,
-            winners=new_winners,
-            rng=current_rng,
+        new_state = lax.with_sharding_constraint(
+            GomokuState(
+                boards=new_boards,
+                current_players=next_players,
+                dones=new_dones,
+                winners=new_winners,
+            ),
+            mesh_rules("batch"),
         )
 
         info = {}
 
         return new_state, observations, rewards, new_dones, info
 
-    @partial(jax.jit, static_argnames=("self",))
-    def reset(
-        self, rng: jax.random.PRNGKey
-    ) -> Tuple[GomokuState, jnp.ndarray, Dict[str, Any]]:
+    def reset(self) -> Tuple[GomokuState, jnp.ndarray, Dict[str, Any]]:
         """
         Resets environments to initial states using the provided RNG key. Pure function.
 
         Args:
             self: The GomokuJaxEnv instance (provides config like B, board_size).
-            rng: JAX PRNGKey to use for initializing the new state.
 
         Returns:
             A tuple (new_state, initial_observations, info).
         """
-        new_state = GomokuJaxEnv.init_state(rng, self.B, self.board_size)
+        new_state = self.init_state()
 
         # observations are player agnostic, representing the board state 1 for black and -1 for white.
         initial_observations = new_state.boards
@@ -229,13 +226,25 @@ class GomokuJaxEnv(JaxEnvBase):
 
         observations = jnp.zeros((max_steps, self.B) + obs_shape, dtype=jnp.float32)
         actions = jnp.zeros((max_steps, self.B) + act_shape, dtype=jnp.int32)
-        values = jnp.zeros((max_steps+1, self.B), dtype=jnp.float32)
+        values = jnp.zeros((max_steps + 1, self.B), dtype=jnp.float32)
         rewards = jnp.zeros((max_steps, self.B), dtype=jnp.float32)
         dones = jnp.zeros((max_steps, self.B), dtype=jnp.bool_)
         log_probs = jnp.zeros((max_steps, self.B), dtype=jnp.float32)
         current_players_buffer = jnp.zeros((max_steps, self.B), dtype=jnp.int32)
 
-        return observations, actions, values, rewards, dones, log_probs, current_players_buffer
+        sharded_output = jax.tree.map(
+            lambda x: lax.with_sharding_constraint(x, mesh_rules("buffer")),
+            (
+                observations,
+                actions,
+                values,
+                rewards,
+                dones,
+                log_probs,
+                current_players_buffer,
+            ),
+        )
+        return sharded_output
 
     # Properties match base class (still using @property for convenience)
     @property
@@ -248,7 +257,6 @@ class GomokuJaxEnv(JaxEnvBase):
         """Returns the shape of a single action (row, col)."""
         return (2,)
 
-    @partial(jax.jit, static_argnames=("self",))
     def get_action_mask(self, state: GomokuState) -> jnp.ndarray:
         """
         Returns a boolean mask of valid actions based on the current state. Pure function.

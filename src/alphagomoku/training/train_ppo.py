@@ -12,7 +12,7 @@ import time
 import os
 from functools import partial
 import hydra.utils
-import logging  
+import logging
 
 from alphagomoku.environments.gomoku import GomokuJaxEnv, GomokuState
 from alphagomoku.models.gomoku.actor_critic import ActorCritic
@@ -24,9 +24,11 @@ from alphagomoku.training.rollout import run_episode, LoopState
 # Get a logger for this module
 logger = logging.getLogger(__name__)
 # Basic configuration (can be enhanced)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 # Set higher level for verbose libraries like absl (used by Orbax)
-logging.getLogger('absl').setLevel(logging.WARNING)
+logging.getLogger("absl").setLevel(logging.WARNING)
 
 
 # --- Training State ---
@@ -62,7 +64,7 @@ def train(cfg: DictConfig):
         name=cfg.wandb.run_name,
         config=wandb_config,
         mode=cfg.wandb.mode,
-        dir=artifacts_dir, # Use artifacts_dir directly, path = artifacts_dir/wandb
+        dir=artifacts_dir,  # Use artifacts_dir directly, path = artifacts_dir/wandb
         sync_tensorboard=True,
         reinit=True,
     )
@@ -145,30 +147,32 @@ def train(cfg: DictConfig):
         # A more robust solution would store total_env_steps in the checkpoint
 
         # Restore the dictionary directly using PyTreeRestore
-        restored_data = checkpointer.restore(
-            latest_step, args=ocp.args.PyTreeRestore()
-        )
+        restored_data = checkpointer.restore(latest_step, args=ocp.args.PyTreeRestore())
 
         # Recreate the training state from the restored dictionary
         # Note: tx (optimizer structure) is recreated, opt_state is restored
         train_state_instance = TrainingState.create(
             apply_fn=model.apply,
-            params=restored_data['params'],
+            params=restored_data["params"],
             tx=tx,
-            opt_state=restored_data['opt_state'],
-            rng=restored_data['rng'],
+            opt_state=restored_data["opt_state"],
+            rng=restored_data["rng"],
             # update_step will be set via replace below
         )
         # Set the update step (epoch number)
-        start_epoch = restored_data['update_step']
+        start_epoch = restored_data["update_step"]
         train_state_instance = train_state_instance.replace(update_step=start_epoch)
 
         logger.info(f"Restored state epoch: {start_epoch}")
         # Restore total_env_steps from the checkpoint
-        total_env_steps = restored_data.get('total_env_steps', 0) # Default to 0 if not found for backward compatibility
+        total_env_steps = restored_data.get(
+            "total_env_steps", 0
+        )  # Default to 0 if not found for backward compatibility
         logger.info(f"Restored total_env_steps to: {total_env_steps}")
         if total_env_steps == 0:
-            logger.warning(f"Restored state, but total_env_steps counter started from 0 (either initial training or older checkpoint format).")
+            logger.warning(
+                f"Restored state, but total_env_steps counter started from 0 (either initial training or older checkpoint format)."
+            )
     else:
         logger.info("No checkpoint found, starting training from scratch.")
         train_state_instance = train_state_instance.replace(update_step=0)
@@ -225,7 +229,7 @@ def train(cfg: DictConfig):
             "logprobs_old": full_trajectory["logprobs"],
             "advantages": advantages,
             "returns": returns,
-            "current_players": full_trajectory["current_players"],  
+            "current_players": full_trajectory["current_players"],
             "valid_mask": full_trajectory["valid_mask"],
         }
 
@@ -317,7 +321,7 @@ def train(cfg: DictConfig):
                 "opt_state": train_state_instance.opt_state,
                 "rng": train_state_instance.rng,
                 "update_step": train_state_instance.update_step,
-                "total_env_steps": total_env_steps, # Add total_env_steps here
+                "total_env_steps": total_env_steps,  # Add total_env_steps here
             }
             # Save the dictionary using PyTreeSave
             save_args = ocp.args.PyTreeSave(save_data)
