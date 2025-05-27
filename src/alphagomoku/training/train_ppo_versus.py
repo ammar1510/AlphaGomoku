@@ -238,14 +238,14 @@ def train(cfg: DictConfig):
                 "opt_state": black_tx.init(black_params),
                 "rng": train_rng_b,
                 "update_step": 0,
-                "total_env_steps": 0,
+                "total_env_steps": 0, # Expect total_env_steps for black
             },
             "white": {
                 "params": white_params,
                 "opt_state": white_tx.init(white_params),
                 "rng": train_rng_w,
                 "update_step": 0,
-                "total_env_steps": 0,
+                "total_env_steps": 0, # Expect total_env_steps for white
             },
         }
         restored_data = checkpointer.restore(
@@ -512,15 +512,15 @@ def train(cfg: DictConfig):
                     "params": black_train_state.params,
                     "opt_state": black_train_state.opt_state,
                     "rng": black_train_state.rng,
-                    "update_step": black_train_state.update_step,  # Epoch number
-                    "total_env_steps": total_env_steps,  # Save total steps
+                    "update_step": black_train_state.update_step, 
+                    "total_env_steps": total_env_steps, 
                 },
                 "white": {
                     "params": white_train_state.params,
                     "opt_state": white_train_state.opt_state,
                     "rng": white_train_state.rng,
-                    "update_step": white_train_state.update_step,  # Epoch number
-                    # No need to save total_env_steps twice, restore from black's state
+                    "update_step": white_train_state.update_step, 
+                    "total_env_steps": total_env_steps, 
                 },
             }
             # Save the combined dictionary using Composite save args

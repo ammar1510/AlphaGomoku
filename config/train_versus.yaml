@@ -11,12 +11,12 @@ defaults:
 seed: 42
 
 # Training loop parameters
-num_envs: 256 # Number of parallel environments
-num_epochs: 20000        # Total number of PPO update epochs
+num_envs: 512 # Number of parallel environments
+num_epochs: 30000        # Total number of PPO update epochs
 
 # Evaluation parameters (Keep or remove if versus script doesn't eval)
 eval_frequency: 200       # Evaluate every N epochs
-eval_games: 64          # Number of games to play during evaluation
+eval_games: 128          # Number of games to play during evaluation
 
 # Checkpointing parameters
 save_frequency: 100       # Save checkpoint every N epochs
