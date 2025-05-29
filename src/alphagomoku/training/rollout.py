@@ -4,9 +4,12 @@ from jax import lax, jit
 from functools import partial
 from typing import Dict, Any, Tuple, NamedTuple
 import distrax  # Added import
+import logging
 
 from alphagomoku.environments.base import JaxEnvBase, EnvState
 from alphagomoku.training.sharding import mesh_rules
+
+logger = logging.getLogger(__name__)
 
 
 class LoopState(NamedTuple):
@@ -196,6 +199,8 @@ def run_episode(
     Note: This function can simulate the behavior of `run_selfplay` function
           by passing the same actor_critic model and params for both the black and white players.
     """
+    logger.info("Compiling rollout function...")
+
     initial_state, initial_obs, _ = env.reset()
 
     buffers = env.initialize_trajectory_buffers(buffer_size)

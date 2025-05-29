@@ -5,10 +5,13 @@ import optax
 from dataclasses import dataclass
 from functools import partial
 from typing import Dict, Tuple
+import logging
 
 from alphagomoku.models.gomoku.actor_critic import ActorCritic
 from alphagomoku.training.rollout import calculate_gae
 from alphagomoku.training.sharding import mesh_rules
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,7 @@ class PPOTrainer:
         batch_data: Dict[str, jnp.ndarray],
     ) -> Dict[str, jnp.ndarray]:
         """Reshapes arrays in the batch dictionary from (T, B, ...) to (T * B, ...) using jax.tree.map."""
+        logger.info("Compiling prepare batch for update function...")
 
         def _reshape_array(array_leaf: jnp.ndarray) -> jnp.ndarray:
             if not hasattr(array_leaf, "shape") or len(array_leaf.shape) < 2:
@@ -75,6 +79,8 @@ class PPOTrainer:
                    - normalized_advantages: Normalized GAE estimates, shape (T, B) or (T,).
                    - returns: Target values for the value function, shape (T, B) or (T,).
         """
+        logger.info("Compiling GAE calculation function...")
+
         advantages_raw, returns = calculate_gae(
             rewards, values, dones, gamma, gae_lambda
         )
@@ -118,6 +124,7 @@ class PPOTrainer:
         Returns:
             tuple: (updated_rng, updated_params, updated_opt_state, metrics averaged over epochs).
         """
+        logger.info("Compiling loss function...")
 
         def loss_fn(
             params: optax.Params, minibatch: Dict[str, jnp.ndarray]
