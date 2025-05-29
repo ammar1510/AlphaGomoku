@@ -4,9 +4,12 @@ from jax import lax, jit
 from functools import partial
 from typing import Dict, Any, Tuple, NamedTuple
 import distrax  # Added import
+import logging
 
 from alphagomoku.environments.base import JaxEnvBase, EnvState
-from alphagomoku.training.sharding import mesh_rules
+from alphagomoku.common.sharding import mesh_rules
+
+logger = logging.getLogger(__name__)
 
 
 class LoopState(NamedTuple):
@@ -21,9 +24,7 @@ class LoopState(NamedTuple):
     current_players: jnp.ndarray
     step_idx: int
     rng: jax.random.PRNGKey
-    termination_step_indices: (
-        jnp.ndarray
-    )  # Stores the step index 't' when done first becomes True for each batch element
+    termination_step_indices: jnp.ndarray  # Stores the step index 't' when done first becomes True for each batch element
 
 
 @partial(jit, static_argnames=["env", "actor_critic"])
@@ -198,6 +199,8 @@ def run_episode(
     Note: This function can simulate the behavior of `run_selfplay` function
           by passing the same actor_critic model and params for both the black and white players.
     """
+    logger.info("Compiling rollout function...")
+
     initial_state, initial_obs, _ = env.reset()
 
     buffers = env.initialize_trajectory_buffers(buffer_size)

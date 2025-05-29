@@ -17,8 +17,8 @@ import logging
 from alphagomoku.environments.gomoku import GomokuJaxEnv, GomokuState
 from alphagomoku.models.gomoku.actor_critic import ActorCritic
 from alphagomoku.policy.ppo import PPOConfig, PPOTrainer
-from alphagomoku.training.rollout import run_episode
-from alphagomoku.training.sharding import mesh_rules
+from alphagomoku.common.rollout import run_episode
+from alphagomoku.common.sharding import mesh_rules
 
 
 # --- Configure Logging ---
@@ -42,6 +42,8 @@ def run_evaluation_games(
     rng: jax.random.PRNGKey,
     # board_size: int, # Removed, will use eval_env.board_size
 ) -> Dict[str, Any]:
+
+    logger.info("Compiling evaluation function...")
     """Runs a set of evaluation games between two agents using a dedicated evaluation environment."""
     num_eval_games = eval_env.B # Number of games is determined by the eval_env's batch size
     # logger.info(f"Running {num_eval_games} evaluation games...") # This log is now in the main loop
@@ -76,7 +78,6 @@ def run_evaluation_games(
         "eval/black_wins": black_wins,
         "eval/white_wins": white_wins,
         "eval/draws": draws,
-        "eval/total_games_played": num_eval_games,
         "eval/black_win_rate": (black_wins / num_eval_games) if num_eval_games > 0 else 0.0,
         "eval/white_win_rate": (white_wins / num_eval_games) if num_eval_games > 0 else 0.0,
         "eval/draw_rate": (draws / num_eval_games) if num_eval_games > 0 else 0.0,
@@ -297,7 +298,6 @@ def train(cfg: DictConfig):
 
     # --- Pre-compile functions---
 
-    logger.info("Compiling rollout function...")
     jit_rollout = jax.jit(
         run_episode,
         static_argnames=[
@@ -307,7 +307,6 @@ def train(cfg: DictConfig):
             "buffer_size",
         ],
     )
-    logger.info("Rollout function compiled.")
 
     logger.info("Compiling update function for black agent...")
     jit_update_step_black = jax.jit(
@@ -325,9 +324,7 @@ def train(cfg: DictConfig):
         ),
         static_argnames=["optimizer", "config"],
     )
-    logger.info("Update functions compiled.")
 
-    logger.info("Compiling GAE calculation function...")
     jit_ppo_gae = jax.jit(
         partial(
             PPOTrainer.compute_gae_targets,
@@ -336,18 +333,13 @@ def train(cfg: DictConfig):
         ),
         static_argnames=["gamma", "gae_lambda"],
     )
-    logger.info("GAE calculation function compiled.")
 
-    logger.info("Compiling evaluation function...")
     jit_eval = jax.jit(
         run_evaluation_games,
         static_argnames=["eval_env", "black_actor_critic", "white_actor_critic"],
     )
-    logger.info("Evaluation function compiled.")
 
-    logger.info("Compiling PPO prepare batch for update function...")
     jit_prepare_batch = jax.jit(PPOTrainer.prepare_batch_for_update)
-    logger.info("Prepare batch for update function compiled.")
 
     # --- Training Loop --- (Iterates over epochs)
     logger.info(
@@ -496,6 +488,30 @@ def train(cfg: DictConfig):
             update_step=epoch + 1,
         )
 
+        # --- Construct and Log Training Data --- 
+        # Calculate iteration-specific metrics
+        iter_end_time = time.time()
+        sps = steps_this_iter / (iter_end_time - iter_start_time) if (iter_end_time - iter_start_time) > 0 else 0
+        current_epoch_for_log = epoch + 1 # Use current epoch for logging
+        log_data = {
+            "train/epoch": current_epoch_for_log, 
+            "train/total_env_steps": total_env_steps,
+            "train/sps": sps,
+            "train/duration_s": iter_end_time - iter_start_time,
+            "train/steps_this_epoch": steps_this_iter,
+            "rollout/avg_episode_length": jnp.mean(
+                full_trajectory["termination_step_indices"].astype(jnp.float32)
+            ),
+        }
+        # Add black agent metrics
+        for k, v in black_update_metrics.items():
+            log_data[f"ppo_black/{k}"] = v
+        # Add white agent metrics
+        for k, v in white_update_metrics.items():
+            log_data[f"ppo_white/{k}"] = v
+
+        wandb.log(log_data, step=total_env_steps) # Log training data every epoch
+
         # === Checkpointing Phase ===
         save_epoch = epoch + 1  # Use epoch number for checkpoint step counter
         if (
@@ -531,31 +547,6 @@ def train(cfg: DictConfig):
             checkpointer.save(save_epoch, args=save_args, force=True)
             logger.info("Checkpoint saved.")
 
-            # --- Construct and Log Training Data --- 
-            # Calculate iteration-specific metrics only when logging
-            iter_end_time = time.time()
-            sps = steps_this_iter / (iter_end_time - iter_start_time)
-            log_data = {
-                "train/epoch": save_epoch, # Use save_epoch here
-                "train/total_env_steps": total_env_steps,
-                "train/sps": sps,
-                "train/duration_s": iter_end_time - iter_start_time,
-                "train/steps_this_epoch": steps_this_iter,
-                "rollout/avg_episode_length": jnp.mean(
-                    full_trajectory["termination_step_indices"].astype(jnp.float32)
-                ),
-            }
-            # Add black agent metrics
-            for k, v in black_update_metrics.items():
-                log_data[f"ppo_black/{k}"] = v
-            # Add white agent metrics
-            for k, v in white_update_metrics.items():
-                log_data[f"ppo_white/{k}"] = v
-
-            wandb.log(log_data, step=total_env_steps) # Log training data when checkpointing
-
-
-
         # === Evaluation Phase ===
         eval_epoch = epoch + 1
         if eval_epoch % cfg.eval_frequency == 0:
@@ -574,10 +565,10 @@ def train(cfg: DictConfig):
             bw = eval_metrics["eval/black_wins"]
             ww = eval_metrics["eval/white_wins"]
             dr = eval_metrics["eval/draws"]
-            tg = eval_metrics["eval/total_games_played"]
-            bwp = eval_metrics["eval/black_win_rate"] * 100
-            wwp = eval_metrics["eval/white_win_rate"] * 100
-            drp = eval_metrics["eval/draw_rate"] * 100
+            tg = bw + ww + dr
+            bwp = bw / tg * 100
+            wwp = ww / tg * 100
+            drp = dr / tg * 100
             logger.info(
                 f"Evaluation epoch {eval_epoch} results (over {tg} games): "
                 f"Black Wins: {bw} ({bwp:.2f}%), "
