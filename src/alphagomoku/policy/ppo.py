@@ -8,8 +8,8 @@ from typing import Dict, Tuple
 import logging
 
 from alphagomoku.models.gomoku.actor_critic import ActorCritic
-from alphagomoku.training.rollout import calculate_gae
-from alphagomoku.training.sharding import mesh_rules
+from alphagomoku.common.rollout import calculate_gae
+from alphagomoku.common.sharding import mesh_rules
 
 logger = logging.getLogger(__name__)
 

@@ -7,7 +7,7 @@ import distrax  # Added import
 import logging
 
 from alphagomoku.environments.base import JaxEnvBase, EnvState
-from alphagomoku.training.sharding import mesh_rules
+from alphagomoku.common.sharding import mesh_rules
 
 logger = logging.getLogger(__name__)
 
