@@ -11,6 +11,8 @@ if ! grep -qF 'export PATH="$HOME/.local/bin:$PATH"' ~/.profile; then
   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile
 fi
 
+git clone https://github.com/ammar1510/AlphaGomoku.git
+
 cd "$HOME/AlphaGomoku"
 
 . .venv/bin/activate
