@@ -117,21 +117,28 @@ def train(cfg: DictConfig):
     logger.info(f"Detected workspace root: {workspace_root}")
     artifacts_dir = os.path.join(workspace_root, "artifacts")
 
+    # Determine if this is the chief process for distributed training
+    is_main_process = jax.process_index() == 0
+
     # WandB Setup
     wandb_config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
     # Determine the run name: append suffix if provided, otherwise let wandb decide
 
-    run = wandb.init(
-        project=cfg.wandb.project,
-        entity=cfg.wandb.entity,
-        name=cfg.wandb.run_name,
-        config=wandb_config,
-        mode=cfg.wandb.mode,
-        dir=artifacts_dir,  # Use artifacts_dir directly, path = artifacts_dir/wandb
-        sync_tensorboard=True,
-        reinit=True,
-    )
-    print(f"WandB Run URL: {run.url}")
+    run = None # Initialize run to None
+    if is_main_process:
+        run = wandb.init(
+            project=cfg.wandb.project,
+            entity=cfg.wandb.entity,
+            name=cfg.wandb.run_name,
+            config=wandb_config,
+            mode=cfg.wandb.mode,
+            dir=artifacts_dir,  # Use artifacts_dir directly, path = artifacts_dir/wandb
+            sync_tensorboard=True,
+            reinit=True,
+        )
+        print(f"WandB Run URL: {run.url}")
+    else:
+        logger.info(f"WandB initialization skipped on process {jax.process_index()}.")
 
     # RNG Setup
     rng = jax.random.PRNGKey(cfg.seed)
@@ -510,7 +517,8 @@ def train(cfg: DictConfig):
         for k, v in white_update_metrics.items():
             log_data[f"ppo_white/{k}"] = v
 
-        wandb.log(log_data, step=total_env_steps) # Log training data every epoch
+        if is_main_process:
+            wandb.log(log_data, step=total_env_steps) # Log training data every epoch
 
         # === Checkpointing Phase ===
         save_epoch = epoch + 1  # Use epoch number for checkpoint step counter
@@ -575,7 +583,8 @@ def train(cfg: DictConfig):
                 f"White Wins: {ww} ({wwp:.2f}%), "
                 f"Draws: {dr} ({drp:.2f}%)"
             )
-            wandb.log(eval_metrics, step=total_env_steps) # Evaluation metrics logged here
+            if is_main_process:
+                wandb.log(eval_metrics, step=total_env_steps) # Evaluation metrics logged here
 
 
 
@@ -586,7 +595,8 @@ def train(cfg: DictConfig):
     logger.info("Closing WandB run...")
     total_time = time.time() - start_time
     logger.info(f"Training finished in {total_time:.2f} seconds.")
-    wandb.finish()
+    if is_main_process and run is not None:
+        wandb.finish()
 
 
 train()
