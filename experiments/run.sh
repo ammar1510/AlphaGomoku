@@ -6,6 +6,7 @@ export PATH="$HOME/.local/bin:$PATH"
 cd "$HOME/AlphaGomoku"
 
 git switch sharding
+git pull origin sharding
 
 . .venv/bin/activate
 
