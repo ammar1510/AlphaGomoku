@@ -15,6 +15,7 @@ git clone https://github.com/ammar1510/AlphaGomoku.git
 
 cd "$HOME/AlphaGomoku"
 
+
 uv venv .venv --python=3.12
 
 . .venv/bin/activate
