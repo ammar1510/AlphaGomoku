@@ -14,13 +14,6 @@ from functools import partial
 import hydra.utils
 import logging
 
-from alphagomoku.environments.gomoku import GomokuJaxEnv, GomokuState
-from alphagomoku.models.gomoku.actor_critic import ActorCritic
-from alphagomoku.policy.ppo import PPOConfig, PPOTrainer
-from alphagomoku.common.rollout import run_episode
-from alphagomoku.common.sharding import mesh_rules
-
-
 # --- Configure Logging ---
 # Get a logger for this module
 logger = logging.getLogger(__name__)
@@ -30,6 +23,24 @@ logging.basicConfig(
 )
 # Set higher level for verbose libraries like absl (used by Orbax)
 logging.getLogger("absl").setLevel(logging.WARNING)
+
+# --- Initialize JAX Distributed System ---
+if jax.process_count() > 1:
+    jax.distributed.initialize()
+    logger.info(
+            f"JAX distributed system initialized on process {jax.process_index()}/{jax.process_count()}."
+        )
+else:
+    logger.info("JAX distributed system not initialized (single process).")
+ 
+
+# --- Import Modules ---
+from alphagomoku.environments.gomoku import GomokuJaxEnv, GomokuState
+from alphagomoku.models.gomoku.actor_critic import ActorCritic
+from alphagomoku.policy.ppo import PPOConfig, PPOTrainer
+from alphagomoku.common.rollout import run_episode
+from alphagomoku.common.sharding import mesh_rules
+
 
 
 # --- Evaluation Function ---
@@ -100,14 +111,6 @@ class TrainingState(train_state.TrainState):
 )
 def train(cfg: DictConfig):
     """Runs the PPO training loop for two agents (black vs white), configured by Hydra."""
-    # Initialize JAX distributed system if running in a multi-process environment
-    if jax.process_count() > 1:
-        jax.distributed.initialize()
-        logger.info(
-            f"JAX distributed system initialized on process {jax.process_index()}/{jax.process_count()}."
-        )
-    else:
-        logger.info("JAX distributed system not initialized (single process).")
 
     logger.info("Starting adversarial training process...")
     logger.info("Effective Hydra Configuration:")
