@@ -126,6 +126,7 @@ def train(cfg: DictConfig):
 
     run = None # Initialize run to None
     if is_main_process:
+        wandb.login(key=os.getenv("WANDB_API_KEY"))
         run = wandb.init(
             project=cfg.wandb.project,
             entity=cfg.wandb.entity,
