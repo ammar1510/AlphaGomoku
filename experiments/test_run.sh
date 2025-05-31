@@ -20,4 +20,4 @@ git pull origin sharding
 
 . .venv/bin/activate
 
-nohup uv run python -m alphagomoku.training.test_run &
+uv run python -m alphagomoku.training.test_run 
