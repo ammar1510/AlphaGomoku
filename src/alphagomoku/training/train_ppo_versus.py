@@ -100,6 +100,15 @@ class TrainingState(train_state.TrainState):
 )
 def train(cfg: DictConfig):
     """Runs the PPO training loop for two agents (black vs white), configured by Hydra."""
+    # Initialize JAX distributed system if running in a multi-process environment
+    if jax.process_count() > 1:
+        jax.distributed.initialize()
+        logger.info(
+            f"JAX distributed system initialized on process {jax.process_index()}/{jax.process_count()}."
+        )
+    else:
+        logger.info("JAX distributed system not initialized (single process).")
+
     logger.info("Starting adversarial training process...")
     logger.info("Effective Hydra Configuration:")
     print(OmegaConf.to_yaml(cfg))
