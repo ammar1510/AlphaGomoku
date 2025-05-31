@@ -1,13 +1,11 @@
 import jax
 import logging
-import sys # For stdout
 
 # --- Configure Logging ---
 # Basic configuration
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    stream=sys.stdout,  # Explicitly set to stdout to match print behavior
 )
 logger = logging.getLogger(__name__)
 
