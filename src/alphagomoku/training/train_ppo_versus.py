@@ -1,5 +1,4 @@
 import jax
-import jax.numpy as jnp
 import logging
 
 # --- Configure Logging ---
@@ -22,6 +21,7 @@ if jax.process_count() > 1:
 else:
     logger.info("JAX distributed system not initialized (single process).")
  
+import jax.numpy as jnp
 import optax
 import wandb
 import orbax.checkpoint as ocp

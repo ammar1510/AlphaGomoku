@@ -6,7 +6,7 @@ from functools import partial
 from typing import NamedTuple, Tuple, Dict, Any
 
 # Import the module to test
-from alphagomoku.training import rollout
+from alphagomoku.common import rollout
 from alphagomoku.environments.base import JaxEnvBase, EnvState
 
 # Basic configuration for tests
