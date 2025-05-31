@@ -20,4 +20,6 @@ git pull origin sharding
 
 . .venv/bin/activate
 
+uv pip install -e .[dev]
+
 nohup uv run python -m alphagomoku.training.train_ppo_versus &
