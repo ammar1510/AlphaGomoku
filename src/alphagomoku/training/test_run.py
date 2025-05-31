@@ -1,22 +1,6 @@
 import jax
 import logging
 
-# --- Now import other libraries ---
-import jax.numpy as jnp
-import optax
-import wandb
-import orbax.checkpoint as ocp
-import flax.linen as nn
-from flax.training import train_state
-import hydra
-from omegaconf import DictConfig, OmegaConf
-from typing import Dict, Any, Tuple, Optional
-import time
-import os
-from functools import partial
-import hydra.utils
-
-
 # --- Configure Logging ---
 # Basic configuration
 logging.basicConfig(
@@ -28,6 +12,19 @@ logger = logging.getLogger(__name__)
 # Set higher level for verbose libraries like absl (used by Orbax)
 # This should be done after basicConfig if it affects root, or on specific loggers
 logging.getLogger("absl").setLevel(logging.WARNING)
+
+# --- Now import other libraries ---
+import jax.numpy as jnp
+import optax
+import orbax.checkpoint as ocp
+import flax.linen as nn
+from flax.training import train_state
+from omegaconf import DictConfig, OmegaConf
+from typing import Dict, Any, Tuple, Optional
+import time
+import os
+from functools import partial
+
 
 # --- Your main code would go here ---
 logger.info("This is a test info message from the main module.")
