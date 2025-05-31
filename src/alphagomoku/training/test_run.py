@@ -3,12 +3,11 @@ import logging
 import sys # For stdout
 
 # --- Configure Logging ---
-# Basic configuration, force=True ensures it applies even if other loggers are set up.
+# Basic configuration
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     stream=sys.stdout,  # Explicitly set to stdout to match print behavior
-    force=True
 )
 logger = logging.getLogger(__name__)
 
