@@ -1,17 +1,5 @@
 import jax
 import jax.numpy as jnp
-import optax
-import wandb
-import orbax.checkpoint as ocp
-import flax.linen as nn
-from flax.training import train_state
-import hydra
-from omegaconf import DictConfig, OmegaConf
-from typing import Dict, Any, Tuple, Optional
-import time
-import os
-from functools import partial
-import hydra.utils
 import logging
 
 # --- Configure Logging ---
@@ -24,6 +12,7 @@ logging.basicConfig(
 # Set higher level for verbose libraries like absl (used by Orbax)
 logging.getLogger("absl").setLevel(logging.WARNING)
 
+
 # --- Initialize JAX Distributed System ---
 if jax.process_count() > 1:
     jax.distributed.initialize()
@@ -33,6 +22,19 @@ if jax.process_count() > 1:
 else:
     logger.info("JAX distributed system not initialized (single process).")
  
+import optax
+import wandb
+import orbax.checkpoint as ocp
+import flax.linen as nn
+from flax.training import train_state
+import hydra
+from omegaconf import DictConfig, OmegaConf
+from typing import Dict, Any, Tuple, Optional
+import time
+import os
+from functools import partial
+import hydra.utils
+
 
 # --- Import Modules ---
 from alphagomoku.environments.gomoku import GomokuJaxEnv, GomokuState
