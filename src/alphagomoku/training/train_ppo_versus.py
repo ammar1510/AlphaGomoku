@@ -13,13 +13,8 @@ logging.getLogger("absl").setLevel(logging.WARNING)
 
 
 # --- Initialize JAX Distributed System ---
-if jax.process_count() > 1:
-    jax.distributed.initialize()
-    logger.info(
-            f"JAX distributed system initialized on process {jax.process_index()}/{jax.process_count()}."
-        )
-else:
-    logger.info("JAX distributed system not initialized (single process).")
+jax.distributed.initialize()
+logger.info(f"JAX distributed system initialized on process {jax.process_index()}.")
  
 import jax.numpy as jnp
 import optax
