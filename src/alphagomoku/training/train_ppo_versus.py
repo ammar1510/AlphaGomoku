@@ -1,5 +1,20 @@
 import jax
 import logging
+import jax.numpy as jnp
+import optax
+import wandb
+import orbax.checkpoint as ocp
+import flax.linen as nn
+from flax.training import train_state
+import hydra
+from omegaconf import DictConfig, OmegaConf
+from typing import Dict, Any, Tuple, Optional
+import time
+import os
+from functools import partial
+import hydra.utils
+
+
 
 # --- Configure Logging ---
 # Get a logger for this module
@@ -15,20 +30,6 @@ logging.getLogger("absl").setLevel(logging.WARNING)
 # --- Initialize JAX Distributed System ---
 jax.distributed.initialize()
 logger.info(f"JAX distributed system initialized on process {jax.process_index()}.")
- 
-import jax.numpy as jnp
-import optax
-import wandb
-import orbax.checkpoint as ocp
-import flax.linen as nn
-from flax.training import train_state
-import hydra
-from omegaconf import DictConfig, OmegaConf
-from typing import Dict, Any, Tuple, Optional
-import time
-import os
-from functools import partial
-import hydra.utils
 
 
 # --- Import Modules ---
