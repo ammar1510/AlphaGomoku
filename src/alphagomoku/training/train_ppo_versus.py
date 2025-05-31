@@ -1,4 +1,6 @@
 import jax
+import nest_asyncio
+nest_asyncio.apply()
 import logging
 import jax.numpy as jnp
 import optax
