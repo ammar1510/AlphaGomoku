@@ -14,15 +14,6 @@ import os
 from functools import partial
 import hydra.utils
 
-
-# --- Import Modules ---
-from alphagomoku.environments.gomoku import GomokuJaxEnv, GomokuState
-from alphagomoku.models.gomoku.actor_critic import ActorCritic
-from alphagomoku.policy.ppo import PPOConfig, PPOTrainer
-from alphagomoku.common.rollout import run_episode
-from alphagomoku.common.sharding import mesh_rules
-
-
 # --- Configure Logging ---
 # Get a logger for this module
 logger = logging.getLogger(__name__)
