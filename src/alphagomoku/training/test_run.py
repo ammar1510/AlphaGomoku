@@ -26,4 +26,4 @@ logging.getLogger("absl").setLevel(logging.WARNING)
 
 
 jax.distributed.initialize()
-logger.info(f"JAX distributed system initialized on process {jax.process_index()}.")
+print("JAX distributed system initialized on process", jax.process_index())
