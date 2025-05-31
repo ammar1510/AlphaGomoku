@@ -17,7 +17,7 @@ import logging
 from alphagomoku.environments.gomoku import GomokuJaxEnv, GomokuState
 from alphagomoku.models.gomoku.actor_critic import ActorCritic
 from alphagomoku.policy.ppo import PPOConfig, PPOTrainer
-from alphagomoku.training.rollout import run_episode, LoopState
+from alphagomoku.common.rollout import run_episode, LoopState
 
 
 # --- Configure Logging ---

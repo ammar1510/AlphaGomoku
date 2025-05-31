@@ -15,6 +15,7 @@ import time
 import os
 from functools import partial
 import hydra.utils
+from orbax.checkpoint.utils import fully_replicated_host_local_array_to_global_array
 
 
 
@@ -546,18 +547,27 @@ def train(cfg: DictConfig):
                 f"Saving checkpoint at epoch {save_epoch} (total env steps ~{total_env_steps})..."
             )
             # Create a combined dictionary containing both states
+            
+            black_rng_to_save = black_train_state.rng
+            white_rng_to_save = white_train_state.rng
+
+            if jax.process_count() > 1:
+                logger.info("Multi-host environment detected. Converting RNGs to global arrays for checkpointing.")
+                black_rng_to_save = fully_replicated_host_local_array_to_global_array(black_rng_to_save)
+                white_rng_to_save = fully_replicated_host_local_array_to_global_array(white_rng_to_save)
+
             save_data = {
                 "black": {
                     "params": black_train_state.params,
                     "opt_state": black_train_state.opt_state,
-                    "rng": black_train_state.rng,
+                    "rng": black_rng_to_save, # Use potentially converted RNG
                     "update_step": black_train_state.update_step, 
                     "total_env_steps": total_env_steps, 
                 },
                 "white": {
                     "params": white_train_state.params,
                     "opt_state": white_train_state.opt_state,
-                    "rng": white_train_state.rng,
+                    "rng": white_rng_to_save, # Use potentially converted RNG
                     "update_step": white_train_state.update_step, 
                     "total_env_steps": total_env_steps, 
                 },
