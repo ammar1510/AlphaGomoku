@@ -36,12 +36,12 @@ import hydra.utils
 logger.info("This is a test info message from the main module.")
 print("This is a test print message.")
 
+# --- Initialize JAX Distributed System (before other heavy imports if it logs) ---
+jax.distributed.initialize()
+logger.info(f"JAX distributed system initialized on process {jax.process_index()} of {jax.process_count()}.")
+
 if __name__ == '__main__':
     logger.info(f"Script {__file__} started on process {jax.process_index()}.")
     # Add any other test logic here if needed
     logger.info("Script finished.")
 
-
-# --- Initialize JAX Distributed System (before other heavy imports if it logs) ---
-jax.distributed.initialize()
-logger.info(f"JAX distributed system initialized on process {jax.process_index()} of {jax.process_count()}.")
