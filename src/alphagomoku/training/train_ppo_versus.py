@@ -393,7 +393,7 @@ def train(cfg: DictConfig):
         black_train_state = black_train_state.replace(rng=black_rng_current)
         # white_train_state = white_train_state.replace(rng=white_rng_current) # White RNG updated after its update step
 
-        steps_this_iter = full_trajectory["valid_mask"].sum()
+        steps_this_iter = full_trajectory["valid_mask"].sum().item()
         total_env_steps += steps_this_iter
 
         # === GAE Calculation Phase (Same for both perspectives initially) ===
@@ -511,22 +511,24 @@ def train(cfg: DictConfig):
         iter_end_time = time.time()
         sps = steps_this_iter / (iter_end_time - iter_start_time) if (iter_end_time - iter_start_time) > 0 else 0
         current_epoch_for_log = epoch + 1 # Use current epoch for logging
+        
+        # Convert JAX arrays to Python scalars for logging
         log_data = {
-            "train/epoch": current_epoch_for_log, 
+            "train/epoch": current_epoch_for_log,
             "train/total_env_steps": total_env_steps,
             "train/sps": sps,
             "train/duration_s": iter_end_time - iter_start_time,
             "train/steps_this_epoch": steps_this_iter,
-            "rollout/avg_episode_length": jnp.mean(
+            "rollout/avg_episode_length": float(jnp.mean(
                 full_trajectory["termination_step_indices"].astype(jnp.float32)
-            ),
+            ).item()),
         }
         # Add black agent metrics
         for k, v in black_update_metrics.items():
-            log_data[f"ppo_black/{k}"] = v
+            log_data[f"ppo_black/{k}"] = float(v.item())
         # Add white agent metrics
         for k, v in white_update_metrics.items():
-            log_data[f"ppo_white/{k}"] = v
+            log_data[f"ppo_white/{k}"] = float(v.item())
 
         if is_main_process:
             wandb.log(log_data, step=total_env_steps) # Log training data every epoch
@@ -581,18 +583,21 @@ def train(cfg: DictConfig):
                 white_params=white_train_state.params,
                 rng=eval_rng_key,
             )
-            bw = eval_metrics["eval/black_wins"]
-            ww = eval_metrics["eval/white_wins"]
-            dr = eval_metrics["eval/draws"]
-            tg = bw + ww + dr
-            bwp = bw / tg * 100
-            wwp = ww / tg * 100
-            drp = dr / tg * 100
+            bw_s = eval_metrics["eval/black_wins"].item()
+            ww_s = eval_metrics["eval/white_wins"].item()
+            dr_s = eval_metrics["eval/draws"].item()
+            # Ensure tg_s is calculated from Python numbers to be a Python number
+            tg_s = bw_s + ww_s + dr_s 
+            
+            bwp_s = (bw_s / tg_s * 100) if tg_s > 0 else 0.0
+            wwp_s = (ww_s / tg_s * 100) if tg_s > 0 else 0.0
+            drp_s = (dr_s / tg_s * 100) if tg_s > 0 else 0.0
+            
             logger.info(
-                f"Evaluation epoch {eval_epoch} results (over {tg} games): "
-                f"Black Wins: {bw} ({bwp:.2f}%), "
-                f"White Wins: {ww} ({wwp:.2f}%), "
-                f"Draws: {dr} ({drp:.2f}%)"
+                f"Evaluation epoch {eval_epoch} results (over {tg_s} games): "
+                f"Black Wins: {bw_s} ({bwp_s:.2f}%), "
+                f"White Wins: {ww_s} ({wwp_s:.2f}%), "
+                f"Draws: {dr_s} ({drp_s:.2f}%)"
             )
             if is_main_process:
                 wandb.log(eval_metrics, step=total_env_steps) # Evaluation metrics logged here
