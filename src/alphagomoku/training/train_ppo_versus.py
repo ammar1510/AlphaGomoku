@@ -1,4 +1,7 @@
 import jax
+import nest_asyncio
+nest_asyncio.apply()
+import logging
 import jax.numpy as jnp
 import optax
 import wandb
@@ -12,13 +15,8 @@ import time
 import os
 from functools import partial
 import hydra.utils
-import logging
+from orbax.checkpoint.utils import fully_replicated_host_local_array_to_global_array
 
-from alphagomoku.environments.gomoku import GomokuJaxEnv, GomokuState
-from alphagomoku.models.gomoku.actor_critic import ActorCritic
-from alphagomoku.policy.ppo import PPOConfig, PPOTrainer
-from alphagomoku.common.rollout import run_episode
-from alphagomoku.common.sharding import mesh_rules
 
 
 # --- Configure Logging ---
@@ -30,6 +28,20 @@ logging.basicConfig(
 )
 # Set higher level for verbose libraries like absl (used by Orbax)
 logging.getLogger("absl").setLevel(logging.WARNING)
+
+
+# --- Initialize JAX Distributed System ---
+jax.distributed.initialize()
+logger.info(f"JAX distributed system initialized on process {jax.process_index()}.")
+
+
+# --- Import Modules ---
+from alphagomoku.environments.gomoku import GomokuJaxEnv, GomokuState
+from alphagomoku.models.gomoku.actor_critic import ActorCritic
+from alphagomoku.policy.ppo import PPOConfig, PPOTrainer
+from alphagomoku.common.rollout import run_episode
+from alphagomoku.common.sharding import mesh_rules
+
 
 
 # --- Evaluation Function ---
@@ -100,6 +112,7 @@ class TrainingState(train_state.TrainState):
 )
 def train(cfg: DictConfig):
     """Runs the PPO training loop for two agents (black vs white), configured by Hydra."""
+
     logger.info("Starting adversarial training process...")
     logger.info("Effective Hydra Configuration:")
     print(OmegaConf.to_yaml(cfg))
@@ -117,21 +130,29 @@ def train(cfg: DictConfig):
     logger.info(f"Detected workspace root: {workspace_root}")
     artifacts_dir = os.path.join(workspace_root, "artifacts")
 
+    # Determine if this is the chief process for distributed training
+    is_main_process = jax.process_index() == 0
+
     # WandB Setup
     wandb_config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
     # Determine the run name: append suffix if provided, otherwise let wandb decide
 
-    run = wandb.init(
-        project=cfg.wandb.project,
-        entity=cfg.wandb.entity,
-        name=cfg.wandb.run_name,
-        config=wandb_config,
-        mode=cfg.wandb.mode,
-        dir=artifacts_dir,  # Use artifacts_dir directly, path = artifacts_dir/wandb
-        sync_tensorboard=True,
-        reinit=True,
-    )
-    print(f"WandB Run URL: {run.url}")
+    run = None # Initialize run to None
+    if is_main_process:
+        wandb.login(key=os.getenv("WANDB_API_KEY"))
+        run = wandb.init(
+            project=cfg.wandb.project,
+            entity=cfg.wandb.entity,
+            name=cfg.wandb.run_name,
+            config=wandb_config,
+            mode=cfg.wandb.mode,
+            dir=artifacts_dir,  # Use artifacts_dir directly, path = artifacts_dir/wandb
+            sync_tensorboard=True,
+            reinit=True,
+        )
+        print(f"WandB Run URL: {run.url}")
+    else:
+        logger.info(f"WandB initialization skipped on process {jax.process_index()}.")
 
     # RNG Setup
     rng = jax.random.PRNGKey(cfg.seed)
@@ -375,7 +396,7 @@ def train(cfg: DictConfig):
         black_train_state = black_train_state.replace(rng=black_rng_current)
         # white_train_state = white_train_state.replace(rng=white_rng_current) # White RNG updated after its update step
 
-        steps_this_iter = full_trajectory["valid_mask"].sum()
+        steps_this_iter = full_trajectory["valid_mask"].sum().item()
         total_env_steps += steps_this_iter
 
         # === GAE Calculation Phase (Same for both perspectives initially) ===
@@ -493,24 +514,27 @@ def train(cfg: DictConfig):
         iter_end_time = time.time()
         sps = steps_this_iter / (iter_end_time - iter_start_time) if (iter_end_time - iter_start_time) > 0 else 0
         current_epoch_for_log = epoch + 1 # Use current epoch for logging
+        
+        # Convert JAX arrays to Python scalars for logging
         log_data = {
-            "train/epoch": current_epoch_for_log, 
+            "train/epoch": current_epoch_for_log,
             "train/total_env_steps": total_env_steps,
             "train/sps": sps,
             "train/duration_s": iter_end_time - iter_start_time,
             "train/steps_this_epoch": steps_this_iter,
-            "rollout/avg_episode_length": jnp.mean(
+            "rollout/avg_episode_length": float(jnp.mean(
                 full_trajectory["termination_step_indices"].astype(jnp.float32)
-            ),
+            ).item()),
         }
         # Add black agent metrics
         for k, v in black_update_metrics.items():
-            log_data[f"ppo_black/{k}"] = v
+            log_data[f"ppo_black/{k}"] = float(v.item())
         # Add white agent metrics
         for k, v in white_update_metrics.items():
-            log_data[f"ppo_white/{k}"] = v
+            log_data[f"ppo_white/{k}"] = float(v.item())
 
-        wandb.log(log_data, step=total_env_steps) # Log training data every epoch
+        if is_main_process:
+            wandb.log(log_data, step=total_env_steps) # Log training data every epoch
 
         # === Checkpointing Phase ===
         save_epoch = epoch + 1  # Use epoch number for checkpoint step counter
@@ -523,18 +547,27 @@ def train(cfg: DictConfig):
                 f"Saving checkpoint at epoch {save_epoch} (total env steps ~{total_env_steps})..."
             )
             # Create a combined dictionary containing both states
+            
+            black_rng_to_save = black_train_state.rng
+            white_rng_to_save = white_train_state.rng
+
+            if jax.process_count() > 1:
+                logger.info("Multi-host environment detected. Converting RNGs to global arrays for checkpointing.")
+                black_rng_to_save = fully_replicated_host_local_array_to_global_array(black_rng_to_save)
+                white_rng_to_save = fully_replicated_host_local_array_to_global_array(white_rng_to_save)
+
             save_data = {
                 "black": {
                     "params": black_train_state.params,
                     "opt_state": black_train_state.opt_state,
-                    "rng": black_train_state.rng,
+                    "rng": black_rng_to_save, # Use potentially converted RNG
                     "update_step": black_train_state.update_step, 
                     "total_env_steps": total_env_steps, 
                 },
                 "white": {
                     "params": white_train_state.params,
                     "opt_state": white_train_state.opt_state,
-                    "rng": white_train_state.rng,
+                    "rng": white_rng_to_save, # Use potentially converted RNG
                     "update_step": white_train_state.update_step, 
                     "total_env_steps": total_env_steps, 
                 },
@@ -562,20 +595,24 @@ def train(cfg: DictConfig):
                 white_params=white_train_state.params,
                 rng=eval_rng_key,
             )
-            bw = eval_metrics["eval/black_wins"]
-            ww = eval_metrics["eval/white_wins"]
-            dr = eval_metrics["eval/draws"]
-            tg = bw + ww + dr
-            bwp = bw / tg * 100
-            wwp = ww / tg * 100
-            drp = dr / tg * 100
+            bw_s = eval_metrics["eval/black_wins"].item()
+            ww_s = eval_metrics["eval/white_wins"].item()
+            dr_s = eval_metrics["eval/draws"].item()
+            # Ensure tg_s is calculated from Python numbers to be a Python number
+            tg_s = bw_s + ww_s + dr_s 
+            
+            bwp_s = (bw_s / tg_s * 100) if tg_s > 0 else 0.0
+            wwp_s = (ww_s / tg_s * 100) if tg_s > 0 else 0.0
+            drp_s = (dr_s / tg_s * 100) if tg_s > 0 else 0.0
+            
             logger.info(
-                f"Evaluation epoch {eval_epoch} results (over {tg} games): "
-                f"Black Wins: {bw} ({bwp:.2f}%), "
-                f"White Wins: {ww} ({wwp:.2f}%), "
-                f"Draws: {dr} ({drp:.2f}%)"
+                f"Evaluation epoch {eval_epoch} results (over {tg_s} games): "
+                f"Black Wins: {bw_s} ({bwp_s:.2f}%), "
+                f"White Wins: {ww_s} ({wwp_s:.2f}%), "
+                f"Draws: {dr_s} ({drp_s:.2f}%)"
             )
-            wandb.log(eval_metrics, step=total_env_steps) # Evaluation metrics logged here
+            if is_main_process:
+                wandb.log(eval_metrics, step=total_env_steps) # Evaluation metrics logged here
 
 
 
@@ -586,7 +623,8 @@ def train(cfg: DictConfig):
     logger.info("Closing WandB run...")
     total_time = time.time() - start_time
     logger.info(f"Training finished in {total_time:.2f} seconds.")
-    wandb.finish()
+    if is_main_process and run is not None:
+        wandb.finish()
 
 
 train()

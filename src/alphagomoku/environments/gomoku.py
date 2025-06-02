@@ -5,7 +5,7 @@ from typing import Tuple, Dict, Any, NamedTuple, Optional
 from functools import partial
 
 from .base import JaxEnvBase, EnvState
-from alphagomoku.training.sharding import mesh_rules
+from alphagomoku.common.sharding import mesh_rules
 
 # --- Constants and Kernel Generation ---
 WIN_LENGTH = 5

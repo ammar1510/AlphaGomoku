@@ -19,7 +19,7 @@ eval_frequency: 200       # Evaluate every N epochs
 eval_games: 128          # Number of games to play during evaluation
 
 # Checkpointing parameters
-save_frequency: 100       # Save checkpoint every N epochs
+save_frequency: 20 # Save checkpoint every N epochs
 checkpoint_dir: "checkpoints_versus_15x15" # Default directory for versus checkpoints
 max_checkpoints: 10
 
