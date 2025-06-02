@@ -1,3 +1,4 @@
 # @package gomoku
 board_size: 15
 win_length: 5
+buffer_size: 128

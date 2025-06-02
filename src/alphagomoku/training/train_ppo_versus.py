@@ -52,7 +52,7 @@ def run_evaluation_games(
     white_actor_critic: ActorCritic,
     white_params: Any,
     rng: jax.random.PRNGKey,
-    # board_size: int, # Removed, will use eval_env.board_size
+    buffer_size: int, 
 ) -> Dict[str, Any]:
 
     logger.info("Compiling evaluation function...")
@@ -69,7 +69,7 @@ def run_evaluation_games(
         white_actor_critic=white_actor_critic,
         white_params=white_params,
         rng=eval_rng,
-        buffer_size=eval_env.board_size * eval_env.board_size, # Use board_size from eval_env
+        buffer_size=buffer_size, # Use buffer_size from cfg
     )
 
     terminated_mask = game_trajectory["dones"]
@@ -357,7 +357,7 @@ def train(cfg: DictConfig):
 
     jit_eval = jax.jit(
         run_evaluation_games,
-        static_argnames=["eval_env", "black_actor_critic", "white_actor_critic"],
+        static_argnames=["eval_env", "black_actor_critic", "white_actor_critic", "buffer_size"],
     )
 
     jit_prepare_batch = jax.jit(PPOTrainer.prepare_batch_for_update)
@@ -389,7 +389,7 @@ def train(cfg: DictConfig):
             white_actor_critic=white_model,
             white_params=white_params_current,
             rng=rollout_rng,
-            buffer_size=cfg.gomoku.board_size * cfg.gomoku.board_size,
+            buffer_size=cfg.gomoku.buffer_size,
         )
 
         # Update agent RNGs in their states *after* potential use in rollout/update
@@ -594,6 +594,7 @@ def train(cfg: DictConfig):
                 white_actor_critic=white_model,
                 white_params=white_train_state.params,
                 rng=eval_rng_key,
+                buffer_size=cfg.gomoku.buffer_size,
             )
             bw_s = eval_metrics["eval/black_wins"].item()
             ww_s = eval_metrics["eval/white_wins"].item()
