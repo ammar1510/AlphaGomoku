@@ -36,7 +36,7 @@ logger.info(f"JAX distributed system initialized on process {jax.process_index()
 
 
 # --- Import Modules ---
-from alphagomoku.environments.gomoku import GomokuJaxEnv, GomokuState
+from alphagomoku.environments.gomoku import GomokuEnv, GomokuState
 from alphagomoku.models.gomoku.actor_critic import ActorCritic
 from alphagomoku.policy.ppo import PPOConfig, PPOTrainer
 from alphagomoku.common.rollout import run_episode
@@ -46,7 +46,7 @@ from alphagomoku.common.sharding import mesh_rules
 
 # --- Evaluation Function ---
 def run_evaluation_games(
-    eval_env: GomokuJaxEnv, # Changed to accept a dedicated eval_env
+    eval_env: GomokuEnv, # Changed to accept a dedicated eval_env
     black_actor_critic: ActorCritic,
     black_params: Any,
     white_actor_critic: ActorCritic,
@@ -161,13 +161,13 @@ def train(cfg: DictConfig):
     )
 
     # Environment Setup
-    env = GomokuJaxEnv(
+    env = GomokuEnv(
         B=cfg.num_envs,
         board_size=cfg.gomoku.board_size,
         win_length=cfg.gomoku.win_length,
     )
     # Create a separate environment for evaluation
-    eval_env = GomokuJaxEnv(
+    eval_env = GomokuEnv(
         B=cfg.eval_games, # Use eval_games for the batch size
         board_size=cfg.gomoku.board_size,
         win_length=cfg.gomoku.win_length,

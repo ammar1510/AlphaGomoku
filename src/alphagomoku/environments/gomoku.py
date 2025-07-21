@@ -4,7 +4,7 @@ from jax import lax
 from typing import Tuple, Dict, Any, NamedTuple, Optional
 from functools import partial
 
-from .base import JaxEnvBase, EnvState
+from .base import Env, EnvState
 from alphagomoku.common.sharding import mesh_rules
 
 # --- Constants and Kernel Generation ---
@@ -22,7 +22,7 @@ class GomokuState(NamedTuple):
 
 
 # --- Environment Logic ---
-class GomokuJaxEnv(JaxEnvBase):
+class GomokuEnv(Env):
     """
     Functional JAX-based Gomoku environment logic container.
     Observations are player agnostic, representing the board state 1 for black and -1 for white.
@@ -47,7 +47,7 @@ class GomokuJaxEnv(JaxEnvBase):
         self.board_size = board_size
         self.win_length = win_length
 
-        self.win_kernels = GomokuJaxEnv._create_win_kernels(self.win_length)
+        self.win_kernels = GomokuEnv._create_win_kernels(self.win_length)
         self.win_kernels_dn = ("NHWC", "HWIO", "NHWC")
 
     def _create_win_kernels(win_len: int = WIN_LENGTH):
@@ -134,7 +134,7 @@ class GomokuJaxEnv(JaxEnvBase):
         Takes a step in each environment based on the current state and actions. Pure function.
 
         Args:
-            self: The GomokuJaxEnv instance (provides config like B, board_size, win_length).
+            self: The GomokuEnv instance (provides config like B, board_size, win_length).
             state: The current GomokuState.
             actions: JAX array of actions (row, col) for each env. Shape (B, 2).
 
@@ -197,7 +197,7 @@ class GomokuJaxEnv(JaxEnvBase):
         Resets environments to initial states using the provided RNG key. Pure function.
 
         Args:
-            self: The GomokuJaxEnv instance (provides config like B, board_size).
+            self: The GomokuEnv instance (provides config like B, board_size).
 
         Returns:
             A tuple (new_state, initial_observations, info).

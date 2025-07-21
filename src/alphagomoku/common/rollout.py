@@ -6,7 +6,7 @@ from typing import Dict, Any, Tuple, NamedTuple
 import distrax  # Added import
 import logging
 
-from alphagomoku.environments.base import JaxEnvBase, EnvState
+from alphagomoku.environments.base import Env, EnvState
 from alphagomoku.common.sharding import mesh_rules
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ class LoopState(NamedTuple):
 
 @partial(jit, static_argnames=["env", "actor_critic"])
 def player_move(
-    loop_state: LoopState, env: JaxEnvBase, actor_critic: Any, params: Any
+    loop_state: LoopState, env: Env, actor_critic: Any, params: Any
 ) -> LoopState:
     """Takes a single step in the environment using the provided actor-critic."""
     current_state: EnvState = loop_state.state
@@ -104,13 +104,13 @@ def player_move(
 
 
 # @partial(jax.jit, static_argnames=["env", "actor_critic", "buffer_size"])
-# def run_selfplay(env: JaxEnvBase, actor_critic: Any, params: Any, rng: jax.random.PRNGKey, buffer_size: int) -> Tuple[Dict[str, Any], jax.random.PRNGKey]:
+# def run_selfplay(env: Env, actor_critic: Any, params: Any, rng: jax.random.PRNGKey, buffer_size: int) -> Tuple[Dict[str, Any], jax.random.PRNGKey]:
 #     """
 #     Collect complete trajectories until all games terminate.
 #     Buffers are allocated based on buffer_size.
 #
 #     Args:
-#         env: An instance of JaxEnvBase (e.g., GomokuJaxEnv).
+#         env: An instance of Env (e.g., GomokuEnv).
 #         actor_critic: ActorCritic model instance.
 #         params: Model parameters.
 #         rng: JAX random key.
@@ -166,7 +166,7 @@ def player_move(
     static_argnames=["env", "black_actor_critic", "white_actor_critic", "buffer_size"],
 )
 def run_episode(
-    env: JaxEnvBase,
+    env: Env,
     black_actor_critic: Any,
     black_params: Any,
     white_actor_critic: Any,
@@ -182,7 +182,7 @@ def run_episode(
     Buffers are allocated based on buffer_size.
 
     Args:
-        env: An instance of JaxEnvBase. Assumes player 1 is "black".
+        env: An instance of Env. Assumes player 1 is "black".
         black_actor_critic: ActorCritic model for black player (first player).
         black_params: Parameters for black player model.
         white_actor_critic: ActorCritic model for white player (second player).
@@ -239,7 +239,7 @@ def run_episode(
     @partial(jit, static_argnames=["env", "black_actor_critic", "white_actor_critic"])
     def body_fn_alternating(
         l_state: LoopState,
-        env: JaxEnvBase,
+        env: Env,
         black_actor_critic: Any,
         black_params: Any,
         white_actor_critic: Any,

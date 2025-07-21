@@ -8,7 +8,7 @@ from typing import Tuple, Dict, Any, Type, Optional, TypeVar
 EnvState = TypeVar("EnvState")
 
 
-class JaxEnvBase(abc.ABC):
+class Env(abc.ABC):
     """
     Abstract Base Class for JAX-based environment logic containers.
 

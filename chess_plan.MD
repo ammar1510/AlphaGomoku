@@ -53,7 +53,7 @@ This document outlines the design for a JAX-compatible, batched chess environmen
 
 ## 4. Key Functions & Logic
 
-### `GomokuJaxEnv.step(state: ChessState, action: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]) -> Tuple[ChessState, jnp.ndarray, jnp.ndarray, jnp.ndarray, Dict]`
+### `ChessEnv.step(state: ChessState, action: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]) -> Tuple[ChessState, jnp.ndarray, jnp.ndarray, jnp.ndarray, Dict]`
 
 -   Decodes `action` (from_sq, plane_idx) to `(to_sq, promotion_piece)`.
 -   Updates `boards` array:
@@ -69,7 +69,7 @@ This document outlines the design for a JAX-compatible, batched chess environmen
 -   Switches `current_players`.
 -   Returns `(new_state, observations, rewards, dones, info)`.
 
-### `GomokuJaxEnv.get_action_mask(state: ChessState) -> jnp.ndarray`
+### `ChessEnv.get_action_mask(state: ChessState) -> jnp.ndarray`
 
 -   **Output Shape:** `(B, 8, 8, 73)` boolean mask.
 -   **Process:**
@@ -93,7 +93,7 @@ This document outlines the design for a JAX-compatible, batched chess environmen
     -   `plane_delta_col: jnp.ndarray`
     -   `plane_promotion_piece_type: jnp.ndarray` (0 if no promotion, or piece type for underpromotion planes, QUEEN implicitly for queen-like promotion moves).
 
-### `GomokuJaxEnv.reset(rng: jax.random.PRNGKey) -> Tuple[ChessState, jnp.ndarray, Dict]`
+### `ChessEnv.reset(rng: jax.random.PRNGKey) -> Tuple[ChessState, jnp.ndarray, Dict]`
 
 -   Initializes the board to the standard chess starting position.
 -   Sets initial player (White), castling rights, EP target (none), clocks.
